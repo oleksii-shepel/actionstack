@@ -1,7 +1,7 @@
-import { Injector, Type, inject } from "@angular/core";
-import { BehaviorSubject, EMPTY, Observable, Observer, Subject, Subscription, catchError, combineLatest, concatMap, defaultIfEmpty, distinctUntilChanged, filter, finalize, firstValueFrom, from, ignoreElements, map, mergeMap, of, scan, tap, withLatestFrom } from "rxjs";
+import { InjectionToken, Injector, Type, inject } from "@angular/core";
+import { BehaviorSubject, EMPTY, Observable, Observer, Subject, Subscription, catchError, concatMap, defaultIfEmpty, distinctUntilChanged, filter, finalize, firstValueFrom, from, ignoreElements, mergeMap, of, scan, tap, withLatestFrom } from "rxjs";
 import { action, bindActionCreators } from "./actions";
-import { ActionStack } from "./collections";
+import { Stack } from "./collections";
 import { runSideEffectsInParallel, runSideEffectsSequentially } from "./effects";
 import { isValidMiddleware } from "./hash";
 import { starter } from "./starter";
@@ -11,8 +11,8 @@ import { Action, AnyFn, FeatureModule, MainModule, MetaReducer, Reducer, SideEff
 export { createStore as store };
 
 export class StoreSettings {
-  shouldDispatchSystemActions!: boolean;
-  shouldAwaitStatePropagation!: boolean;
+  dispatchSystemActions!: boolean;
+  awaitStatePropagation!: boolean;
   enableMetaReducers!: boolean;
   enableAsyncReducers!: boolean;
 
@@ -22,8 +22,8 @@ export class StoreSettings {
 
   static get default(): StoreSettings {
     return {
-      shouldDispatchSystemActions: true,
-      shouldAwaitStatePropagation: true,
+      dispatchSystemActions: false,
+      awaitStatePropagation: true,
       enableMetaReducers: false,
       enableAsyncReducers: false,
     };
@@ -63,7 +63,7 @@ export class Store {
     strategy: "exclusive" | "concurrent";
   };
   protected actionStream: Subject<Action<any>>;
-  protected actionStack: ActionStack;
+  protected actionStack: Stack;
   protected currentAction: CustomAsyncSubject<any>;
   protected currentState: CustomAsyncSubject<any>;
   protected isProcessing: BehaviorSubject<boolean>;
@@ -72,12 +72,7 @@ export class Store {
   protected settings: StoreSettings;
 
   protected constructor() {
-    let STORE_SETTINGS_DEFAULT =  {
-      shouldDispatchSystemActions: true,
-      shouldAwaitStatePropagation: true,
-      enableMetaReducers: false,
-      enableAsyncReducers: false
-    };
+    let STORE_SETTINGS_DEFAULT = StoreSettings.default;
 
     let MAIN_MODULE_DEFAULT = {
       slice: "main",
@@ -98,7 +93,7 @@ export class Store {
     };
 
     let ACTION_STREAM_DEFAULT = new Subject<Action<any>>();
-    let ACTION_STACK_DEFAULT = new ActionStack();
+    let ACTION_STACK_DEFAULT = new Stack();
 
     let CURRENT_ACTION_DEFAULT = new CustomAsyncSubject<any>();
     let CURRENT_STATE_DEFAULT = new CustomAsyncSubject<any>();
@@ -151,7 +146,7 @@ export class Store {
         store.processAction()
       ).subscribe();
 
-      store.systemActions = bindActionCreators(systemActions, (action: Action<any>) => store.settings.shouldDispatchSystemActions && store.dispatch(action));
+      store.systemActions = bindActionCreators(systemActions, (action: Action<any>) => store.settings.dispatchSystemActions && store.dispatch(action));
 
       store.systemActions.initializeState();
       store.systemActions.storeInitialized();
@@ -213,28 +208,26 @@ export class Store {
   }
 
   protected updateState<T = any>(slice: keyof T | string[] | undefined, callback: AnyFn, action: Action<any> = systemActions.updateState()): Observable<any> {
+    return from((async () => {
+      if(callback === undefined) {
+        throw new Error('Callback function is missing. State will not be updated.')
+      }
 
-    if(callback === undefined) {
-      throw new Error('Callback function is missing. State will not be updated.')
-    }
+      let state = await this.getState(slice);
+      let result = await callback(state);
+      let newState = await this.setState(slice, result);
 
-    return convertToObservable(this.getState(slice)).pipe(
-      concatMap((state) => {
-        return convertToObservable(callback!(state)).pipe(
-          (concatMap((result) => {
-            return convertToObservable(this.setState(slice, result)).pipe(
-              concatMap((newState) => {
-              let stateUpdated = this.currentState.next(newState);
-              let actionHandled = this.currentAction.next(action);
-              return (this.settings.shouldAwaitStatePropagation ? combineLatest([
-                from(stateUpdated), from(actionHandled)
-              ]).pipe(map(() => action)) : of(action));
-            }))
-          }))
-        );
-      })
-    );
+      let stateUpdated = this.currentState.next(newState);
+      let actionHandled = this.currentAction.next(action);
+
+      if (this.settings.awaitStatePropagation) {
+        await Promise.allSettled([stateUpdated, actionHandled]);
+      }
+
+      return action;
+    })());
   }
+
 
   subscribe(next?: AnyFn | Observer<any>, error?: AnyFn, complete?: AnyFn): Subscription {
     const stateObservable = this.currentState.asObservable().pipe(
@@ -392,7 +385,6 @@ export class Store {
     return [combinedReducer, featureState, errors];
   }
 
-
   protected hydrateState(state: any, initialState: any): any {
     // Create a new object to avoid mutating the original state
     let newState = {...state};
@@ -448,53 +440,95 @@ export class Store {
   }
 
   protected injectDependencies(injector: Injector): Store {
-    let dependencies = this.modules.map(module => module.dependencies ?? {});
-    dependencies.unshift(this.mainModule.dependencies ?? {})
+    // Initialize the new dependencies object
+    let newDependencies = {} as any;
 
-    this.pipeline.dependencies = {};
-    dependencies = Object.assign({}, ...dependencies);
+    // Combine all dependencies into one object
+    let allDependencies = [this.mainModule.dependencies, ...this.modules.map(module => module.dependencies)].filter(Boolean);
 
-    for (const key in dependencies) {
-      if (!this.pipeline.dependencies.hasOwnProperty(key)) {
-        const DependencyType = dependencies[key] as Type<any>;
-        this.pipeline.dependencies[key] = injector.get(DependencyType);
+    // Recursively clone and update dependencies
+    allDependencies.forEach((dep: any) => {
+      Object.keys(dep).forEach(key => {
+        newDependencies[key] = deepCopy(dep[key]);
+      });
+    });
+
+    // Initialize the pipeline dependencies object
+    this.pipeline.dependencies = {} as any;
+
+    // Create a stack for depth-first traversal of newDependencies
+    let stack: { parent: any, key: string | number, subtree: any }[] = Object.keys(newDependencies).map(key => ({ parent: newDependencies, key, subtree: this.pipeline.dependencies }));
+
+    while (stack.length > 0) {
+      const { parent, key, subtree } = stack.pop()!;
+      const value = parent[key];
+      if (Array.isArray(value)) {
+        // If value is an array, add its elements to the stack
+        subtree[key] = [];
+        stack.push(...value.map((v, i) => ({ parent: value, key: i, subtree: subtree[key] })));
+      } else if (typeof value === 'object' && value !== null) {
+        // If value is an object, add its children to the stack
+        subtree[key] = {};
+        stack.push(...Object.keys(value).map(childKey => ({ parent: value, key: childKey, subtree: subtree[key] })));
+      } else if (typeof value === 'function' || value instanceof InjectionToken) {
+        // If value is a function or an instance of InjectionToken, get the dependency from the injector
+        const Dependency = value as Type<any> | InjectionToken<any>;
+        subtree[key] = injector.get(Dependency);
       }
     }
+
     return this;
   }
-
 
   protected ejectDependencies(module: FeatureModule): Store {
-    let propertiesToDelete = Object.keys(module.dependencies ?? {});
+    // Combine all dependencies into one object, excluding the module to eject
+    let allDependencies = [this.mainModule.dependencies, ...this.modules.filter(m => m !== module).map(m => m.dependencies)].filter(Boolean);
 
-    let dependencies = this.modules.map(module => module.dependencies ?? {});
-    dependencies.unshift(this.mainModule.dependencies ?? {})
-    for (const key in dependencies) {
-      let index = propertiesToDelete.findIndex(property => property === key);
-      if (index > -1) {
-        propertiesToDelete.splice(index);
+    // Initialize the new dependencies object
+    let newDependencies = {} as any;
+
+    // Recursively clone and update dependencies
+    allDependencies.forEach((dep: any) => {
+      Object.keys(dep).forEach(key => {
+        newDependencies[key] = deepCopy(dep[key]);
+      });
+    });
+
+    // Create a stack for the DFS traversal
+    let stack = [{ source: this.pipeline.dependencies, target: newDependencies }];
+
+    while (stack.length > 0) {
+      const { source, target } = stack.pop()!;
+      for (const key in target) {
+        if (Array.isArray(target[key])) {
+          // If target[key] is an array, iterate over its elements
+          for (let i = 0; i < target[key].length; i++) {
+            if (typeof target[key][i] !== 'function' && !(target[key][i] instanceof InjectionToken)) {
+              stack.push({ source: source[key][i], target: target[key][i] });
+            } else {
+              target[key][i] = source[key][i];
+            }
+          }
+        } else if (typeof target[key] !== 'function' && !(target[key] instanceof InjectionToken)) {
+          stack.push({ source: source[key], target: target[key] });
+        } else {
+          target[key] = source[key];
+        }
       }
     }
 
-    propertiesToDelete.forEach(property => {
-      delete this.pipeline.dependencies[property];
-    })
+    // Assign the newly formed dependencies object
+    this.pipeline.dependencies = newDependencies;
 
     return this;
   }
+
 
   protected processAction() {
     return (source: Observable<Action<any>>) => {
       return source.pipe(
         concatMap((action: Action<any>) => {
-          return this.updateState("@global", (state) => {
-            const reducerResult = this.pipeline.reducer(state, action);
-            // Check if enableAsyncReducers is false and reducer is an async function
-            // if (reducerResult instanceof Promise && this.settings.enableAsyncReducers === false) {
-            //   throw new Error("Async reducers are disabled.");
-            // }
-            return reducerResult;
-          }, action).pipe(
+          return this.updateState("@global", (state) => this.pipeline.reducer(state, action), action).pipe(
             finalize(() => (this.actionStack.pop(), this.actionStack.length === 0 && this.isProcessing.next(false)))
           );
         }),
@@ -541,10 +575,6 @@ export function createStore(mainModule: MainModule, enhancer?: StoreEnhancer) {
   return Store.create(mainModule, enhancer);
 }
 
-function convertToObservable(obj: any | Promise<any>) {
-  return obj instanceof Promise ? from(obj) : of(obj);
-}
-
 function compose(...funcs: AnyFn[]): AnyFn {
   if (funcs.length === 0) {
     return (arg: any): any => arg;
@@ -557,27 +587,41 @@ function compose(...funcs: AnyFn[]): AnyFn {
   return funcs.reduce((a, b) => (...args: any[]) => a(b(...args)));
 }
 
-// a helper function to recursively clone and update an object with a given path and value
-function cloneAndUpdate(obj: any, path: string[], value: any): any {
-  // base case: if the path is empty, return the value
-  if (path.length === 0) {
-    return value;
+function deepCopy(obj: any) {
+  if (obj === null || typeof obj !== 'object') {
+    return obj;
   }
-  // recursive case: clone the current object and update the property with the first element of the path
-  const key = path[0];
-  const rest = path.slice(1);
-  const clonedObj = {...obj};
-  if(obj !== undefined) {
-    if (Array.isArray(obj[key])) {
-      // if the property is an array, clone and update the element with the next element of the path
-      const index = parseInt(rest[0]);
-      const restRest = rest.slice(1);
-      clonedObj[key] = [...obj[key]];
-      clonedObj[key][index] = cloneAndUpdate(obj[key][index], restRest, value);
-    } else {
-      // if the property is an object, clone and update the nested property with the rest of the path
-      clonedObj[key] = cloneAndUpdate(obj[key], rest, value);
+
+  let copy: any = Array.isArray(obj) ? [] : {};
+
+  for (let key in obj) {
+    if (obj.hasOwnProperty(key)) {
+      copy[key] = deepCopy(obj[key]);
     }
   }
+
+  return copy;
+}
+
+function cloneAndUpdate(obj: any, path: string[], value: any, clone: boolean = true): any {
+  if (path.length === 0) {
+    return clone ? deepCopy(value) : value;
+  }
+
+  const index = parseInt(path[0], 10);
+  const key = !isNaN(index) ? index : path[0]
+  const rest = path.slice(1);
+
+  // Check if the key is a numeric index and if so, initialize obj as an array
+  obj = obj !== undefined ? obj : (!isNaN(index)) ? [] : {};
+
+  const clonedObj = Array.isArray(obj) ? [...obj] : {...obj};
+
+  // Initialize obj[key] if it's undefined
+  clonedObj[key] = obj[key] !== undefined ? (Array.isArray(obj[key]) ? [...obj[key]] : {...obj[key]}) : (rest.length && !isNaN(parseInt(rest[0], 10)) ? [] : {});
+
+  // Recursively update the nested property with the rest of the path
+  clonedObj[key] = cloneAndUpdate(clonedObj[key], rest, value, clone);
+
   return clonedObj;
 }
