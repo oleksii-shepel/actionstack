@@ -1,4 +1,5 @@
-import { Observable } from "rxjs";
+import { InjectionToken, Type } from "@angular/core";
+import { Observable, isObservable } from "rxjs";
 import { Store } from "./store";
 
 export interface Action<T = any> {
@@ -12,18 +13,12 @@ export interface AsyncAction<T = any> {
   (...args: any[]): Promise<T>;
 }
 
-export type SyncFunction<T> = (...args: any[]) => T;
-export type AsyncFunction<T> = (...args: any[]) => Promise<T>;
-
-export type SyncActionCreator<T> = (...args: any[]) => (dispatch: Function, getState?: Function, dependencies?: Record<string, any>) => T;
-export type AsyncActionCreator<T> = (...args: any[]) => (dispatch: Function, getState?: Function, dependencies?: Record<string, any>) => Promise<T>;
-
 export type Reducer = (state: any, action: Action<any>) => any | Promise<any>;
 export type MetaReducer = (reducer: Reducer) => Reducer | Promise<Reducer>;
 
 export interface Middleware {
   (store: any): (next: (action: any) => any) => Promise<(action: any) => any> | any;
-  internal?: boolean;
+  signature?: string;
 }
 
 export type AnyFn = (...args: any[]) => any;
@@ -38,19 +33,24 @@ export interface ProjectionFunction {
 
 export type SideEffect = (action: Observable<Action<any>>, state: Observable<any>, dependencies: Record<string, any>) => Observable<Action<any>>;
 
+export type Tree<LeafType, T = any> = {
+  [K in keyof T]: T[K] extends object ? Tree<LeafType, T[K]> : LeafType;
+};
+
+export type ProcessingStrategy = "exclusive" | "concurrent";
 export interface FeatureModule {
   slice: string;
-  reducer: Reducer | Record<string, Reducer>;
-  dependencies?: Record<string, any>;
+  reducer: Reducer | Tree<Reducer>;
+  dependencies?: Tree<Type<any> | InjectionToken<any>>;
 }
 
 export interface MainModule {
   slice?: string;
-  middlewares?: Middleware[];
-  reducer: Reducer | Record<string, Reducer>;
+  middleware?: Middleware[];
+  reducer: Reducer | Tree<Reducer>;
   metaReducers?: MetaReducer[];
-  dependencies?: Record<string, any>;
-  strategy?: "exclusive" | "concurrent";
+  dependencies?: Tree<Type<any> | InjectionToken<any>>;
+  strategy?: ProcessingStrategy;
 }
 
 export type StoreCreator = (module: MainModule, enhancer?: StoreEnhancer) => Store;
@@ -82,10 +82,15 @@ function kindOf(val: any): string {
   if (isError(val))
     return "error";
 
+  if (isObservable(val))
+    return "observable";
+
+  if (isPromise(val))
+    return "promise";
+
   const constructorName = ctorName(val);
   switch (constructorName) {
     case "Symbol":
-    case "Promise":
     case "WeakMap":
     case "WeakSet":
     case "Map":
@@ -117,6 +122,10 @@ function isBoxed(value: any) {
 
 function isPrimitive(value: any) {
   return value === undefined || value === null || typeof value !== 'object';
+}
+
+function isPromise(value: any) {
+  return Promise.resolve(value) == value;
 }
 
 function isAction(action: any): boolean {

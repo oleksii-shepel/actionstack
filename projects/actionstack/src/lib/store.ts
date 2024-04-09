@@ -1,126 +1,79 @@
 import { InjectionToken, Injector, Type, inject } from "@angular/core";
-import { BehaviorSubject, EMPTY, Observable, Observer, Subject, Subscription, catchError, concatMap, defaultIfEmpty, distinctUntilChanged, filter, finalize, firstValueFrom, from, ignoreElements, mergeMap, of, scan, tap, withLatestFrom } from "rxjs";
+import { BehaviorSubject, EMPTY, Observable, Subject, Subscription, catchError, concatMap, distinctUntilChanged, filter, finalize, firstValueFrom, from, ignoreElements, map, mergeMap, of, scan, tap, withLatestFrom } from "rxjs";
 import { action, bindActionCreators } from "./actions";
 import { Stack } from "./collections";
 import { runSideEffectsInParallel, runSideEffectsSequentially } from "./effects";
 import { isValidMiddleware } from "./hash";
+import { Lock } from "./lock";
 import { starter } from "./starter";
-import { AsyncObserver, CustomAsyncSubject } from "./subject";
-import { Action, AnyFn, FeatureModule, MainModule, MetaReducer, Reducer, SideEffect, StoreEnhancer, isPlainObject, kindOf } from "./types";
+import { CustomAsyncSubject } from "./subject";
+import { Action, AnyFn, FeatureModule, MainModule, MetaReducer, ProcessingStrategy, Reducer, SideEffect, StoreEnhancer, Tree, isPlainObject, kindOf } from "./types";
 
 export { createStore as store };
 
 export class StoreSettings {
-  dispatchSystemActions!: boolean;
-  awaitStatePropagation!: boolean;
-  enableMetaReducers!: boolean;
-  enableAsyncReducers!: boolean;
+  dispatchSystemActions = true;
+  awaitStatePropagation = true;
+  enableMetaReducers = true;
+  enableAsyncReducers = true;
+};
 
-  constructor() {
-    Object.assign(this, StoreSettings.default);
-  }
+const SYSTEM_ACTION_TYPES = [
+  "INITIALIZE_STATE",
+  "UPDATE_STATE",
+  "STORE_INITIALIZED",
+  "MODULE_LOADED",
+  "MODULE_UNLOADED",
+  "EFFECTS_REGISTERED",
+  "EFFECTS_UNREGISTERED"
+] as const;
 
-  static get default(): StoreSettings {
-    return {
-      dispatchSystemActions: false,
-      awaitStatePropagation: true,
-      enableMetaReducers: false,
-      enableAsyncReducers: false,
-    };
-  }
+// Define the type from the values of the array
+export type SystemActionTypes = typeof SYSTEM_ACTION_TYPES[number] & string;
+
+export function isSystemActionType(type: string): type is SystemActionTypes {
+  return SYSTEM_ACTION_TYPES.includes(type as SystemActionTypes);
 }
 
-
-export const systemActionTypes = {
-  INITIALIZE_STATE: `INITIALIZE_STATE`,
-  UPDATE_STATE: `UPDATE_STATE`,
-  STORE_INITIALIZED: `STORE_INITIALIZED`,
-  MODULE_LOADED: `MODULE_LOADED`,
-  MODULE_UNLOADED: `MODULE_UNLOADED`,
-  EFFECTS_REGISTERED: `EFFECTS_REGISTERED`,
-  EFFECTS_UNREGISTERED: `EFFECTS_UNREGISTERED`
-};
+function systemAction<T extends SystemActionTypes>(type: T, payload?: Function) {
+  return action(type, payload);
+}
 
 // Define the action creators
 const systemActions = {
-  initializeState: action(systemActionTypes.INITIALIZE_STATE),
-  updateState: action(systemActionTypes.UPDATE_STATE),
-  storeInitialized: action(systemActionTypes.STORE_INITIALIZED),
-  moduleLoaded: action(systemActionTypes.MODULE_LOADED, (module: FeatureModule) => ({module})),
-  moduleUnloaded: action(systemActionTypes.MODULE_UNLOADED, (module: FeatureModule) => ({module})),
-  effectsRegistered: action(systemActionTypes.EFFECTS_REGISTERED, (effects: SideEffect[]) => ({effects})),
-  effectsUnregistered: action(systemActionTypes.EFFECTS_UNREGISTERED, (effects: SideEffect[]) => ({effects}))
+  initializeState: systemAction("INITIALIZE_STATE"),
+  updateState: systemAction("UPDATE_STATE"),
+  storeInitialized: systemAction("STORE_INITIALIZED"),
+  moduleLoaded: systemAction("MODULE_LOADED", (module: FeatureModule) => ({module})),
+  moduleUnloaded: systemAction("MODULE_UNLOADED", (module: FeatureModule) => ({module})),
+  effectsRegistered: systemAction("EFFECTS_REGISTERED", (effects: SideEffect[]) => ({effects})),
+  effectsUnregistered: systemAction("EFFECTS_UNREGISTERED", (effects: SideEffect[]) => ({effects}))
 };
 
-
 export class Store {
-  protected mainModule: MainModule;
-  protected modules: FeatureModule[];
-  protected pipeline: {
-    middlewares: any[];
-    reducer: Reducer;
-    dependencies: Record<string, any>;
-    strategy: "exclusive" | "concurrent";
+  protected mainModule: MainModule = {
+    slice: "main",
+    middleware: [],
+    reducer: (state: any = {}, action: Action<any>) => state,
+    metaReducers: [],
+    dependencies: {},
+    strategy: "exclusive" as ProcessingStrategy
   };
-  protected actionStream: Subject<Action<any>>;
-  protected actionStack: Stack;
-  protected currentAction: CustomAsyncSubject<any>;
-  protected currentState: CustomAsyncSubject<any>;
-  protected isProcessing: BehaviorSubject<boolean>;
-  protected subscription: Subscription;
-  protected systemActions: Record<keyof typeof systemActions, any>;
-  protected settings: StoreSettings;
-
-  protected constructor() {
-    let STORE_SETTINGS_DEFAULT = StoreSettings.default;
-
-    let MAIN_MODULE_DEFAULT = {
-      slice: "main",
-      middlewares: [],
-      reducer: (state: any = {}, action: Action<any>) => state,
-      metaReducers: [],
-      dependencies: {},
-      strategy: "exclusive" as "exclusive"
-    };
-
-    let MODULES_DEFAULT: FeatureModule[] = [];
-
-    let PIPELINE_DEFAULT = {
-      middlewares: [],
-      reducer: (state: any = {}, action: Action<any>) => state,
-      dependencies: {},
-      strategy: "exclusive" as "exclusive"
-    };
-
-    let ACTION_STREAM_DEFAULT = new Subject<Action<any>>();
-    let ACTION_STACK_DEFAULT = new Stack();
-
-    let CURRENT_ACTION_DEFAULT = new CustomAsyncSubject<any>();
-    let CURRENT_STATE_DEFAULT = new CustomAsyncSubject<any>();
-
-    let PROCESSING_DEFAULT = new BehaviorSubject(false);
-    let SUBSCRIPTION_DEFAULT = Subscription.EMPTY;
-    let SYSTEM_ACTIONS_DEFAULT = { ...systemActions };
-
-    try {
-      STORE_SETTINGS_DEFAULT = Object.assign(STORE_SETTINGS_DEFAULT, inject(StoreSettings));
-    } catch {
-      console.warn("Failed to inject StoreSettings. Please check your configuration and try again.");
-      STORE_SETTINGS_DEFAULT = STORE_SETTINGS_DEFAULT;
-    }
-
-    this.mainModule = MAIN_MODULE_DEFAULT;
-    this.modules = MODULES_DEFAULT;
-    this.pipeline = PIPELINE_DEFAULT;
-    this.actionStream = ACTION_STREAM_DEFAULT;
-    this.actionStack = ACTION_STACK_DEFAULT;
-    this.currentAction = CURRENT_ACTION_DEFAULT;
-    this.currentState = CURRENT_STATE_DEFAULT;
-    this.isProcessing = PROCESSING_DEFAULT;
-    this.subscription = SUBSCRIPTION_DEFAULT;
-    this.systemActions = SYSTEM_ACTIONS_DEFAULT;
-    this.settings = STORE_SETTINGS_DEFAULT;
-  }
+  protected modules: FeatureModule[] = [];
+  protected pipeline = {
+    middleware: [] as any[],
+    reducer: (state: any = {}, action: Action<any>) => state as Reducer,
+    dependencies: {} as Tree<Type<any> | InjectionToken<any>>,
+    strategy: "exclusive" as ProcessingStrategy
+  };
+  protected actionStream = new Subject<Action<any>>();
+  protected actionStack = new Stack();
+  protected currentAction = new CustomAsyncSubject<any>();
+  protected currentState = new CustomAsyncSubject<any>();
+  protected isProcessing = new BehaviorSubject<boolean>(false);
+  protected subscription = Subscription.EMPTY;
+  protected systemActions: Record<keyof typeof systemActions, any> = { ...systemActions };
+  protected settings = Object.assign({}, new StoreSettings(), inject(StoreSettings));
 
   static create(mainModule: MainModule, enhancer?: StoreEnhancer) {
 
@@ -128,12 +81,14 @@ export class Store {
 
       let store = new Store();
 
-      store.mainModule = Object.assign(store.mainModule, { ...mainModule });
+      mainModule = Object.assign(store.mainModule, { ...mainModule });
+
+      store.mainModule = mainModule;
       store.pipeline = Object.assign(store.pipeline, {
-        middlewares: Array.from(mainModule.middlewares ?? store.pipeline.middlewares),
-        reducer: (state: any, action: any) => state,
-        dependencies: Object.assign(store.pipeline.dependencies, { ...mainModule.dependencies }),
-        strategy: mainModule.strategy ?? store.pipeline.strategy,
+        middleware: Array.from(mainModule.middleware ?? []),
+        reducer: mainModule.reducer,
+        dependencies: Object.assign({}, { ...mainModule.dependencies }),
+        strategy: mainModule.strategy,
       });
 
       store.applyMiddleware();
@@ -142,7 +97,8 @@ export class Store {
 
       store.subscription = action$.pipe(
         scan((acc, action: any) => ({count: acc.count + 1, action}), {count: 0, action: undefined}),
-        concatMap(({count, action}: any) => (count === 1) ? store.updateState("@global", () => store.setupReducer(), systemActions.initializeState()) : of(action)),
+        concatMap(({count, action}: any) => (count === 1) ? (console.log("%cYou are using ActionStack. Happy coding! 🎉", "font-weight: bold;"),
+          store.updateState("@global", async () => store.setupReducer(), action)) : of(action)),
         store.processAction()
       ).subscribe();
 
@@ -179,16 +135,52 @@ export class Store {
     this.actionStream.next(action);
   }
 
+  select(selector: (obs: Observable<any>) => Observable<any>, defaultValue?: any): Observable<any> {
+    return selector(this.currentState.asObservable()).pipe(
+      map(value => value === undefined ? defaultValue : value),
+      filter(value => value !== undefined),
+      distinctUntilChanged());
+  }
+
   getState<T = any>(slice?: keyof T | string[]): any {
     if (this.currentState.value === undefined || slice === undefined || typeof slice === "string" && slice == "@global") {
       return this.currentState.value as T;
     } else if (typeof slice === "string") {
       return this.currentState.value[slice] as T;
     } else if (Array.isArray(slice)) {
-      return slice.reduce((acc, key) => (acc && Array.isArray(acc) ? acc[parseInt(key)] : acc[key]) || undefined, this.currentState.value) as T;
+      return slice.reduce((acc, key) => {
+        if (acc === undefined || acc === null) {
+          return undefined;
+        } else if (Array.isArray(acc)) {
+          return acc[parseInt(key)];
+        } else {
+          return acc[key];
+        }
+      }, this.currentState.value) as T;
     } else {
       throw new Error("Unsupported type of slice parameter");
     }
+  }
+
+  // Function to apply a single change to the state and accumulate edges
+  protected applyChange(initialState: any, {path, value}: {path: string[], value: any}, edges: Tree<boolean>): any {
+    let currentState: any = Object.keys(edges).length > 0 ? initialState: {...initialState};
+    let currentObj: any = currentState;
+    let currentEdges: Tree<boolean> = edges;
+
+    for (let i = 0; i < path.length; i++) {
+      const key = path[i];
+      if (i === path.length - 1) {
+        // Reached the leaf node, update its value
+        currentObj[key] = value;
+        currentEdges[key] = true;
+      } else {
+        // Continue traversal
+        currentObj = currentObj[key] = currentEdges[key] ? currentObj[key] : { ...currentObj[key] };
+        currentEdges = (currentEdges[key] = currentEdges[key] ?? {}) as any;
+      }
+    }
+    return currentState;
   }
 
   protected setState<T = any>(slice?: keyof T | string[], value?: any): any {
@@ -197,18 +189,16 @@ export class Store {
       return ({...value});
     } else if (typeof slice === "string") {
       // update the state property with the given key with a shallow copy of the value
-      return ({...this.currentState.value, [slice]: {...value}});
+      return {...this.currentState.value, [slice]: { ...value }};
     } else if (Array.isArray(slice)) {
-      // update the nested state property with the given path with a shallow copy of the value
-      // use a helper function to recursively clone and update the object
-      return cloneAndUpdate(this.currentState.value, slice, value);
+      return this.applyChange(this.currentState.value, {path: slice, value}, {});
     } else {
       throw new Error("Unsupported type of slice parameter");
     }
   }
 
-  protected updateState<T = any>(slice: keyof T | string[] | undefined, callback: AnyFn, action: Action<any> = systemActions.updateState()): Observable<any> {
-    return from((async () => {
+  protected updateState<T = any>(slice: keyof T | string[] | undefined, callback: AnyFn, action: Action<any> = systemActions.updateState()): Promise<any> {
+    return (async () => {
       if(callback === undefined) {
         throw new Error('Callback function is missing. State will not be updated.')
       }
@@ -225,185 +215,42 @@ export class Store {
       }
 
       return action;
-    })());
+    })();
   }
 
+  protected combineReducers(reducers: Tree<Reducer>): Reducer {
+    // Create a map for reducers
+    const reducerMap = new Map<Reducer, string[]>();
 
-  subscribe(next?: AnyFn | Observer<any>, error?: AnyFn, complete?: AnyFn): Subscription {
-    const stateObservable = this.currentState.asObservable().pipe(
-      filter(value => value !== undefined),
-      distinctUntilChanged()
-    );
-    if (typeof next === 'function') {
-      return stateObservable.subscribe({next, error, complete});
-    } else {
-      return stateObservable.subscribe(next as Partial<AsyncObserver<any>>);
-    }
-  }
-
-  select(selector: (obs: Observable<any>) => Observable<any>, defaultValue?: any): Observable<any> {
-    let obs = selector(this.currentState.asObservable()).pipe(distinctUntilChanged());
-    if (defaultValue !== undefined) {
-      obs = obs.pipe(defaultIfEmpty(defaultValue));
-    }
-    return obs;
-  }
-
-  extend(...args: SideEffect[]) {
-    const dependencies = this.pipeline.dependencies;
-    const runSideEffects = this.pipeline.strategy === "concurrent" ? runSideEffectsInParallel : runSideEffectsSequentially;
-    const mapMethod = this.pipeline.strategy === "concurrent" ? mergeMap : concatMap;
-
-    const effectsSubscription = this.currentAction.asObservable().pipe(
-      withLatestFrom(this.currentState.asObservable()),
-      concatMap(([action, state]) => runSideEffects(...args)(action, state, dependencies).pipe(
-        mapMethod((childActions: Action<any>[]) => {
-          if (childActions.length > 0) {
-            return from(childActions).pipe(
-            tap((nextAction: Action<any>) => {
-              this.actionStack.push(nextAction);
-              this.dispatch(nextAction);
-            }));
-          }
-          return EMPTY;
-        })
-      )),
-      finalize(() => this.systemActions.effectsUnregistered(args))
-    ).subscribe();
-
-    this.systemActions.effectsRegistered(args);
-    return effectsSubscription;
-  }
-
-  loadModule(module: FeatureModule, injector: Injector) {
-    firstValueFrom(this.isProcessing.pipe(filter(value => value === false),
-      tap(() => {
-        this.isProcessing.next(true);
-        // Check if the module already exists in the this's modules
-        if (this.modules.some(m => m.slice === module.slice)) {
-          // If the module already exists, return the this without changes
-          return;
+    const buildReducerMap = (tree: Tree<Reducer>, path: string[] = []) => {
+      for (const key in tree) {
+        const reducer = tree[key]; const newPath = [...path, key]; // Add current key to the path
+        if(reducer instanceof Function) {
+          reducerMap.set(reducer, newPath);
         }
-        // Create a new array with the module added to the this's modules
-        const newModules = [...this.modules, module];
-
-        // Return a new this with the updated properties
-        this.modules = newModules;
-
-        // Inject dependencies
-        this.injectDependencies(injector);
-      }),
-      concatMap(() => this.updateState("@global", state => this.setupReducer(state), systemActions.updateState())),
-      tap(() => this.systemActions.moduleLoaded(module)),
-      catchError(error => { console.warn(error.message); return EMPTY; }),
-      finalize(() => this.isProcessing.next(false))
-    ));
-
-    return this;
-  }
-
-  unloadModule(module: FeatureModule, clearState: boolean = false) {
-    firstValueFrom(this.isProcessing.pipe(filter(value => value === false),
-      tap(() => {
-        this.isProcessing.next(true);
-        // Create a new array with the module removed from the this's modules
-        const newModules = this.modules.filter(m => m.slice !== module.slice);
-
-        // Return a new this with the updated properties
-        this.modules = newModules;
-
-        // Eject dependencies
-        this.ejectDependencies(module);
-      }),
-      concatMap(() => this.updateState("@global", state => {
-        if (clearState) {
-          state = { ...state };
-          delete state[module.slice];
-        }
-        return this.setupReducer(state);
-      }, systemActions.initializeState())),
-      tap(() => this.systemActions.moduleUnloaded(module)),
-      catchError(error => { console.warn(error.message); return EMPTY; }),
-      finalize(() => this.isProcessing.next(false))
-    ));
-
-    return this;
-  }
-
-  protected async combineReducers(reducers: Record<string, Reducer | Record<string, Reducer>>): Promise<[Reducer, any, Map<string, string>]> {
-    let errors = new Map<string, string>();
-    let featureReducers = {} as any;
-    let featureState = {} as any;
-
-    // Initialize state
-    for (let key of Object.keys(reducers)) {
-      try {
-        if(reducers[key] instanceof Function) {
-          let reducer = reducers[key] as Function;
-          let reducerResult = reducer(undefined, systemActions.initializeState());
-
-          featureState[key] = await reducerResult;
-          featureReducers[key] = reducer;
-
-          if (reducerResult instanceof Promise && this.settings.enableAsyncReducers === false) {
-            throw new Error("Async reducers are disabled.");
-          }
-        } else {
-          let [nestedReducer, nestedState, nestedErrors] = await this.combineReducers(featureReducers[key]);
-          featureState[key] = nestedState;
-          featureReducers[key] = nestedReducer;
-          errors = new Map([...errors, ...nestedErrors]);
-        }
-      } catch (error: any) {
-        errors.set(key, `Initializing state failed for ${key}: ${error.message}`);
-      }
-    }
-
-    Object.keys(featureReducers).filter((key) => errors.has(key)).forEach(key => {
-      delete featureReducers[key];
-    });
-
-    // Combine the main module reducer with the feature module reducers
-    const combinedReducer = async (state: any = {}, action: Action<any>) => {
-      let newState = state;
-
-      for (let key of Object.keys(featureReducers)) {
-        try {
-          const featureState = await featureReducers[key](newState[key], action);
-
-          if(featureState !== newState[key]){
-            newState = {...newState, [key]: featureState};
-          }
-        } catch (error: any) {
-          throw new Error(`Error occurred while processing an action ${action.type} for ${key}: ${error.message}`);
+        else if (typeof reducer === 'object') {
+          buildReducerMap(reducer, newPath);
         }
       }
-
-      return newState;
     };
 
-    return [combinedReducer, featureState, errors];
-  }
+    buildReducerMap(reducers);
 
-  protected hydrateState(state: any, initialState: any): any {
-    // Create a new object to avoid mutating the original state
-    let newState = {...state};
-
-    // Iterate over each property in the initial state
-    for (let prop in initialState) {
-      // If the property is not already present in the state, add it
-      if (!newState.hasOwnProperty(prop) || newState[prop] === undefined) {
-        newState[prop] = initialState[prop];
-      } else if (Array.isArray(initialState[prop])) {
-        // If the property is an array, merge the arrays
-        newState[prop] = newState[prop] ?? initialState[prop];
-      } else if (typeof newState[prop] === 'object' && newState[prop] !== null) {
-        // If the property is an object, recurse into it
-        newState[prop] = this.hydrateState(newState[prop], initialState[prop]);
+    const combinedReducer = async (state: any = {}, action: Action<any>) => {
+      // Apply every reducer to state and track changes
+      let modified = {};
+      for (const [reducer, path] of reducerMap) {
+        try {
+          const currentState = await this.getState(path);
+          const updatedState = await reducer(currentState, action);
+          if(currentState !== updatedState) { state = await this.applyChange(state, {path, value: updatedState}, modified); }
+        } catch (error: any) {
+          console.warn(`Error occurred while processing an action ${action.type} for ${path.join('.')}: ${error.message}`);
+        }
       }
-    }
-
-    return newState;
+      return state;
+    };
+    return combinedReducer;
   }
 
   protected async setupReducer(state: any = {}): Promise<any> {
@@ -412,16 +259,19 @@ export class Store {
       let moduleReducer: any = module.reducer instanceof Function ? module.reducer : {...module.reducer};
       reducers = {...reducers, [module.slice]: moduleReducer};
       return reducers;
-    }, {} as Record<string, Reducer>);
+    }, {} as Tree<Reducer>);
 
-    let [reducer, initialState, errors] = await this.combineReducers(featureReducers);
-
-    // Update store state
-    state = this.hydrateState({ ...state }, initialState);
+    let reducer = await this.combineReducers(featureReducers);
+    let lock = new Lock();
 
     const asyncCompose = (...fns: MetaReducer[]) => async (reducer: Reducer) => {
       for (let i = fns.length - 1; i >= 0; i--) {
+        await lock.acquire();
+        try {
           reducer = await fns[i](reducer);
+        } finally {
+          lock.release();
+        }
       }
       return reducer;
     };
@@ -431,12 +281,8 @@ export class Store {
       && (reducer = await asyncCompose(...this.mainModule.metaReducers)(reducer));
     this.pipeline.reducer = reducer;
 
-    if(errors.size) {
-      let receivedErrors = Array.from(errors.entries()).map((value) => value[1]).join('\n');
-      throw new Error(`${errors.size} errors during state initialization.\n${receivedErrors}`);
-    }
-
-    return state;
+    // Update store state
+    return reducer(state, systemActions.updateState());
   }
 
   protected injectDependencies(injector: Injector): Store {
@@ -495,7 +341,7 @@ export class Store {
     });
 
     // Create a stack for the DFS traversal
-    let stack = [{ source: this.pipeline.dependencies, target: newDependencies }];
+    let stack = [{ source: this.pipeline.dependencies as any, target: newDependencies }];
 
     while (stack.length > 0) {
       const { source, target } = stack.pop()!;
@@ -523,14 +369,19 @@ export class Store {
     return this;
   }
 
-
   protected processAction() {
     return (source: Observable<Action<any>>) => {
       return source.pipe(
-        concatMap((action: Action<any>) => {
-          return this.updateState("@global", (state) => this.pipeline.reducer(state, action), action).pipe(
-            finalize(() => (this.actionStack.pop(), this.actionStack.length === 0 && this.isProcessing.next(false)))
-          );
+        concatMap(async (action: Action<any>) => {
+          try {
+            await this.updateState("@global", async (state) => this.pipeline.reducer(state, action), action);
+          } finally {
+            this.actionStack.pop();
+            if (this.actionStack.length === 0) {
+              this.isProcessing.next(false);
+            }
+          }
+          return EMPTY;
         }),
         ignoreElements(),
         catchError((error) => {
@@ -561,12 +412,98 @@ export class Store {
       dispatch: (action: any) => dispatch(action),
     };
 
-    const middlewares = [starter, ...this.pipeline.middlewares];
-
-    const chain = middlewares.map((middleware, index) => middleware(isValidMiddleware(middleware.signature) && index === 0 ? starterAPI : middlewareAPI));
+    const chain = [starter(isValidMiddleware(starter.signature) ? starterAPI : middlewareAPI), ...this.pipeline.middleware.map(middleware => middleware(middlewareAPI))];
     dispatch = compose(...chain)(this.dispatch.bind(this));
 
     this.dispatch = dispatch;
+    return this;
+  }
+
+  protected processSystemAction(operator: (obs: Observable<any>) => Observable<any>) {
+    return (async() => await firstValueFrom(this.isProcessing.pipe(filter(value => value === false),
+      tap(() => this.isProcessing.next(true)),
+      operator,
+      catchError(error => { console.warn(error.message); return EMPTY; }),
+      finalize(() => this.isProcessing.next(false))
+    )))();
+  }
+
+  extend(...args: SideEffect[]): Observable<any> {
+    const dependencies = this.pipeline.dependencies;
+    const runSideEffects = this.pipeline.strategy === "concurrent" ? runSideEffectsInParallel : runSideEffectsSequentially;
+    const mapMethod = this.pipeline.strategy === "concurrent" ? mergeMap : concatMap;
+    let isIdle = false;
+    const effects$ = this.isProcessing.pipe(
+      tap(value => value === false && (isIdle = true)),
+      filter(value => value),
+      distinctUntilChanged(),
+      tap(() => this.systemActions.effectsRegistered(args)),
+      concatMap(() => this.currentAction.asObservable()),
+      withLatestFrom(this.currentState.asObservable()),
+      concatMap(([action, state]) => runSideEffects(...args)(action, state, dependencies).pipe(
+        mapMethod((childActions: Action<any>[]) => {
+          if (childActions.length > 0) {
+            return from(childActions).pipe(
+              tap((nextAction: Action<any>) => {
+                this.actionStack.push(nextAction);
+                this.dispatch(nextAction);
+              }));
+          }
+          return EMPTY;
+        }),
+        catchError(error => { console.warn(error.message); return EMPTY; }),
+      )),
+      finalize(() => this.systemActions.effectsUnregistered(args))
+    );
+    return effects$;
+  }
+
+  loadModule(module: FeatureModule, injector: Injector) {
+    this.processSystemAction((obs) => obs.pipe(
+      tap(() => {
+        // Check if the module already exists in the this's modules
+        if (this.modules.some(m => m.slice === module.slice)) {
+          // If the module already exists, return the this without changes
+          return;
+        }
+        // Create a new array with the module added to the this's modules
+        const newModules = [...this.modules, module];
+
+        // Return a new this with the updated properties
+        this.modules = newModules;
+
+        // Inject dependencies
+        this.injectDependencies(injector);
+      }),
+      concatMap(() => this.updateState("@global", async (state) => this.setupReducer(state), systemActions.updateState())),
+      tap(() => this.systemActions.moduleLoaded(module)),
+    ));
+
+    return this;
+  }
+
+  unloadModule(module: FeatureModule, clearState: boolean = false) {
+    this.processSystemAction((obs) => obs.pipe(
+      tap(() => {
+        // Create a new array with the module removed from the this's modules
+        const newModules = this.modules.filter(m => m.slice !== module.slice);
+
+        // Return a new this with the updated properties
+        this.modules = newModules;
+
+        // Eject dependencies
+        this.ejectDependencies(module);
+      }),
+      concatMap(() => this.updateState("@global", async (state) => {
+        if (clearState) {
+          state = { ...state };
+          delete state[module.slice];
+        }
+        return this.setupReducer(state);
+      }, systemActions.initializeState())),
+      tap(() => this.systemActions.moduleUnloaded(module)),
+    ));
+
     return this;
   }
 }
@@ -603,25 +540,3 @@ function deepCopy(obj: any) {
   return copy;
 }
 
-function cloneAndUpdate(obj: any, path: string[], value: any, clone: boolean = true): any {
-  if (path.length === 0) {
-    return clone ? deepCopy(value) : value;
-  }
-
-  const index = parseInt(path[0], 10);
-  const key = !isNaN(index) ? index : path[0]
-  const rest = path.slice(1);
-
-  // Check if the key is a numeric index and if so, initialize obj as an array
-  obj = obj !== undefined ? obj : (!isNaN(index)) ? [] : {};
-
-  const clonedObj = Array.isArray(obj) ? [...obj] : {...obj};
-
-  // Initialize obj[key] if it's undefined
-  clonedObj[key] = obj[key] !== undefined ? (Array.isArray(obj[key]) ? [...obj[key]] : {...obj[key]}) : (rest.length && !isNaN(parseInt(rest[0], 10)) ? [] : {});
-
-  // Recursively update the nested property with the rest of the path
-  clonedObj[key] = cloneAndUpdate(clonedObj[key], rest, value, clone);
-
-  return clonedObj;
-}

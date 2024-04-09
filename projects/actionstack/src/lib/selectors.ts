@@ -1,5 +1,5 @@
-import { EMPTY, Observable, concatMap, distinctUntilChanged, filter, map, of, shareReplay, switchMap } from "rxjs";
-import { AnyFn, ProjectionFunction } from "./types";
+import { Observable, concatMap, distinctUntilChanged, filter, map, shareReplay } from "rxjs";
+import { ProjectionFunction, SelectorFunction } from "./types";
 
 export {
   createFeatureSelector as featureSelector,
@@ -10,19 +10,17 @@ export {
 function createFeatureSelector<U = any, T = any> (
   slice: keyof T | string[]): (state$: Observable<T>) => Observable<U> {
   return (state$: Observable<T>) => state$.pipe(
-    filter(state => state !== undefined),
     map(state => (Array.isArray(slice))
       ? slice.reduce((acc, key) => (acc && Array.isArray(acc) ? acc[parseInt(key)] : (acc as any)[key]) || undefined, state)
-      : state[slice]),
-    concatMap(state => state === undefined ? EMPTY: of(state)),
+      : state && state[slice]),
     distinctUntilChanged(),
     shareReplay({bufferSize: 1, refCount: false})
   ) as Observable<U>;
 }
 
 function createSelector<U = any, T = any> (
-  featureSelector$: (store: Observable<T>) => Observable<U>,
-  selectors: AnyFn | AnyFn[],
+  featureSelector$: ((state: Observable<T>) => Observable<U>) | "@global",
+  selectors: SelectorFunction | SelectorFunction[],
   projectionOrOptions?: ProjectionFunction): (props?: any[] | any, projectionProps?: any) => (store: Observable<T>) => Observable<U> {
 
   const isSelectorArray = Array.isArray(selectors);
@@ -38,19 +36,21 @@ function createSelector<U = any, T = any> (
     }
 
     return (state$: Observable<T>) => {
-      return featureSelector$(state$).pipe(
-        concatMap(sliceState => {
+      return (featureSelector$ === "@global"
+        ? state$ : (featureSelector$ as Function)(state$)).pipe(
+        map(sliceState => {
+          if (sliceState === undefined) { return sliceState; }
           let selectorResults;
           if (Array.isArray(selectors)) {
             selectorResults = selectors.map((selector, index) => selector(sliceState, props[index]))
-            return of((selectorResults.some(result => typeof result === 'undefined'))
+            return (selectorResults.some(result => result === undefined))
               ? undefined as U
-              : projection ? projection(selectorResults, projectionProps) : selectorResults)
+              : projection ? projection(selectorResults, projectionProps) : selectorResults;
           } else {
             selectorResults = selectors && selectors(sliceState, props);
-            return of((typeof selectorResults === 'undefined')
+            return (selectorResults === undefined)
               ? undefined as U
-              : projection ? projection(selectorResults, projectionProps) : selectorResults)
+              : projection ? projection(selectorResults, projectionProps) : selectorResults;
           }
         })
       );
@@ -59,8 +59,8 @@ function createSelector<U = any, T = any> (
 }
 
 function createSelectorAsync<U = any, T = any> (
-  featureSelector$: (store: Observable<T>) => Observable<U>,
-  selectors: ((...args: any) => any | Promise<any>) | ((...args: any) => any | Promise<any>)[],
+  featureSelector$: ((state: Observable<T>) => Observable<U>) | "@global",
+  selectors: SelectorFunction | SelectorFunction[],
   projectionOrOptions?: ProjectionFunction
 ): (props?: any[] | any, projectionProps?: any) => (store: Observable<T>) => Observable<U> {
 
@@ -77,24 +77,25 @@ function createSelectorAsync<U = any, T = any> (
     }
 
     return (state$: Observable<T>) => {
-      return featureSelector$(state$).pipe(
+      return (featureSelector$ === "@global"
+        ? state$ : (featureSelector$ as Function)(state$)).pipe(
         concatMap(async sliceState => {
+          if (sliceState === undefined) { return sliceState; }
           let selectorResults;
           if (Array.isArray(selectors)) {
             // Use Promise.all to wait for all async selectors to resolve
             selectorResults = await Promise.all(selectors.map((selector, index) => selector(sliceState, props[index])));
-            return of((selectorResults.some(result => typeof result === 'undefined'))
+            return (selectorResults.some(result => result === undefined))
               ? undefined as U
-              : projection ? projection(selectorResults, projectionProps) : selectorResults)
+              : projection ? projection(selectorResults, projectionProps) : selectorResults;
           } else {
             // If selectors is a single function, await its result
             selectorResults = await selectors(sliceState, props);
-            return of((typeof selectorResults === 'undefined')
+            return (selectorResults === undefined)
               ? undefined as U
-              : projection ? projection(selectorResults, projectionProps) : selectorResults)
+              : projection ? projection(selectorResults, projectionProps) : selectorResults;
           }
-        }),
-        switchMap(result => result) // switchMap to unwrap the Observable returned by of()
+        })
       );
     };
   };
