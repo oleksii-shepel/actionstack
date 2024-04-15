@@ -2,7 +2,7 @@ import { ElementRef, Injectable, OnDestroy, inject } from "@angular/core";
 import { Observable, Subscription } from "rxjs";
 import { StoreModule } from "./module";
 import { Store } from "./store";
-import { Action, Reducer, SideEffect } from "./types";
+import { Action, Reducer, SideEffect, SliceStrategy } from "./types";
 
 
 /**
@@ -13,7 +13,7 @@ export interface SliceOptions {
   reducer?: Reducer;
   effects?: (SideEffect | any)[];
   dependencies?: any;
-  strategy?: "persistent" | "temporary";
+  strategy?: SliceStrategy;
 }
 
 /**
@@ -53,6 +53,11 @@ export class Slice implements OnDestroy {
     };
   }
 
+  /**
+   * Sets up the Slice with the provided options.
+   *
+   * @param opts - Configuration options for the Slice.
+   */
   setup(opts: SliceOptions): void {
     this.opts = Object.assign(this.opts, opts);
     this.opts.effects && this.opts.effects.length && (this.subscription = this.store.extend(...this.opts.effects as any).subscribe());
@@ -63,14 +68,29 @@ export class Slice implements OnDestroy {
     }, StoreModule.injector);
   }
 
+  /**
+   * Dispatches an action to update the state.
+   *
+   * @param action - The action to dispatch.
+   */
   dispatch(action: Action<any>): void {
     this.store.dispatch(action);
   }
 
+  /**
+   * Selects a portion of the state and returns an observable of that portion.
+   *
+   * @param selector - A function to apply to the observable of the state to derive a new observable.
+   * @param defaultValue - A default value to return if the selected portion of the state is undefined.
+   * @returns An observable of the selected portion of the state.
+   */
   select<U = any, T = any>(selector: (obs: Observable<T>) => Observable<U>, defaultValue?: any): any {
     return this.store.select(selector, defaultValue);
   }
 
+  /**
+   * Cleans up resources when the Slice is destroyed.
+   */
   ngOnDestroy(): void {
     this.subscription.unsubscribe();
     this.opts.slice && this.opts.reducer && this.store.unloadModule({slice: this.opts.slice, reducer: this.opts.reducer}, this.opts.strategy === "temporary" ? true : false);
