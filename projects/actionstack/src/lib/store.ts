@@ -1,10 +1,10 @@
 import { InjectionToken, Injector, Type, inject } from "@angular/core";
 import { BehaviorSubject, EMPTY, Observable, Subject, Subscription, catchError, concatMap, distinctUntilChanged, filter, finalize, firstValueFrom, from, ignoreElements, map, mergeMap, of, scan, take, tap } from "rxjs";
 import { action, bindActionCreators } from "./actions";
-import { Stack } from "./collections";
 import { isValidMiddleware } from "./hash";
 import { starter } from "./starter";
 import { CustomAsyncSubject } from "./subject";
+import { Tracker } from "./tracker";
 import { Action, AnyFn, AsyncReducer, FeatureModule, MainModule, MetaReducer, ProcessingStrategy, Reducer, SideEffect, StoreEnhancer, Tree, isAction, isPlainObject, kindOf } from "./types";
 
 export { createStore as store };
@@ -105,13 +105,13 @@ export class Store {
     strategy: "exclusive" as ProcessingStrategy
   };
   protected actionStream = new Subject<Action<any>>();
-  protected actionStack = new Stack();
   protected currentAction = new CustomAsyncSubject<Action<any>>();
   protected currentState = new CustomAsyncSubject<any>();
   protected isProcessing = new BehaviorSubject<boolean>(false);
   protected subscription = Subscription.EMPTY;
   protected systemActions: Record<keyof typeof systemActions, any> = { ...systemActions };
   protected settings = Object.assign({}, new StoreSettings(), inject(StoreSettings));
+  protected tracker = new Tracker();
 
   /**
    * Creates a new store instance with the provided mainModule and optional enhancer.
@@ -298,7 +298,8 @@ export class Store {
     let actionHandled = this.currentAction.next(action);
 
     if (this.settings.awaitStatePropagation) {
-      await Promise.allSettled([stateUpdated, actionHandled]);
+      await Promise.allSettled([stateUpdated, actionHandled, this.tracker.checkAllExecuted()]);
+      this.tracker.reset();
     }
 
     return newState;
@@ -518,12 +519,9 @@ export class Store {
       return source.pipe(
         concatMap(async (action: Action<any>) => {
           try {
-            return await this.updateState("@global", async (state) => this.pipeline.reducer(state, action), action);
+            return await this.updateState("@global", async (state) => await this.pipeline.reducer(state, action), action);
           } finally {
-            this.actionStack.pop();
-            if (this.actionStack.length === 0) {
-              this.isProcessing.next(false);
-            }
+            this.isProcessing.next(false);
           }
         }),
         ignoreElements(),
@@ -549,16 +547,15 @@ export class Store {
     // Define starter and middleware APIs
     const starterAPI = {
       getState: () => this.getState(),
-      dispatch: (action: any) => dispatch(action),
+      dispatch: async (action: any) => await dispatch(action),
       isProcessing: this.isProcessing,
-      actionStack: this.actionStack,
       dependencies: () => this.pipeline.dependencies,
       strategy: () => this.pipeline.strategy
     };
 
     const middlewareAPI = {
       getState: () => this.getState(),
-      dispatch: (action: any) => dispatch(action),
+      dispatch: async (action: any) => await dispatch(action),
     };
 
     // Build middleware chain
@@ -595,7 +592,7 @@ export class Store {
     const dependencies = this.pipeline.dependencies;
     const mapMethod = this.pipeline.strategy === "concurrent" ? mergeMap : concatMap;
 
-    const effects$ = this.isProcessing.pipe(
+    const effects$: Observable<any> = this.isProcessing.pipe(
       filter(value => value === false),
       take(1),
       tap(() => this.systemActions.effectsRegistered(args)),
@@ -608,9 +605,14 @@ export class Store {
           )
         )
       )),
-      finalize(() => this.systemActions.effectsUnregistered(args))
+      tap(() => this.tracker.setStatus(effects$, true)),
+      finalize(() => {
+        this.tracker.remove(effects$);
+        this.systemActions.effectsUnregistered(args)
+      })
     );
 
+    this.tracker.track(effects$);
     return effects$;
   }
 
@@ -637,7 +639,7 @@ export class Store {
         // Inject dependencies
         this.injectDependencies(injector);
       }),
-      concatMap(async () => await this.updateState("@global", async (state) => this.setupReducer(state), systemActions.updateState())),
+      concatMap(async () => await this.updateState("@global", async (state) => await this.setupReducer(state), systemActions.updateState())),
       tap(() => this.systemActions.moduleLoaded(module)),
     ));
 

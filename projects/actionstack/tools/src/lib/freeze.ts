@@ -1,4 +1,4 @@
-import { Action, Reducer } from "@actioncrew/actionstack";
+import { Action, AsyncReducer } from "@actioncrew/actionstack";
 
 function deepFreeze (o: any) {
   Object.freeze(o);
@@ -22,7 +22,7 @@ function deepFreeze (o: any) {
 /**
  * Meta-reducer that prevents state from being mutated anywhere in the app.
  */
-export async function storeFreeze(reducer: Reducer): Promise<Reducer> {
+export async function storeFreeze(reducer: AsyncReducer): Promise<AsyncReducer> {
   return async function freeze(state: any, action: Action<any>) {
     state = state || {};
     deepFreeze(state);
