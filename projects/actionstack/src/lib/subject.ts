@@ -1,4 +1,4 @@
-import { Observable, Subscription, shareReplay } from 'rxjs';
+import { Observable, Subscription } from 'rxjs';
 
 /**
  * Function to convert a custom `CustomAsyncSubject` instance into a standard RxJS `Observable`.
@@ -9,21 +9,53 @@ import { Observable, Subscription, shareReplay } from 'rxjs';
  * @returns Observable<T> - The resulting RxJS `Observable`.
  */
 export function toObservable<T>(customAsyncSubject: CustomAsyncSubject<T>): Observable<T> {
+  let lastValue = undefined;
   return new Observable<T>((subscriber) => {
+
+    subscriber.next(lastValue!);
     const subscription = customAsyncSubject.subscribe({
       next: async (value) => {
-        subscriber.next(value);
+        lastValue = value;
+        await subscriber.next(value);
       },
       error: async (error) => {
-        subscriber.error(error);
+        await subscriber.error(error);
       },
       complete: async () => {
-        subscriber.complete();
+        await subscriber.complete();
       }
     });
 
     return () => subscription.unsubscribe();
-  }).pipe(shareReplay(1));
+  });
+}
+
+/**
+ * Waits for a condition to be met in an observable stream.
+ * @param {Observable<any>} obs - The observable stream to wait for.
+ * @param {(value: any) => boolean} predicate - The predicate function to evaluate the values emitted by the observable stream.
+ * @returns {Promise<boolean>} A promise that resolves to true when the predicate condition is met, or false if the observable completes without satisfying the predicate.
+ */
+export function waitFor(obs: Observable<any>, predicate: (value: any) => boolean): Promise<boolean> {
+  return new Promise((resolve, reject) => {
+    let resolved = false;
+    const subscription = obs.subscribe({
+      next: value => {
+        if (predicate(value) === true) {
+          resolved = true;
+          resolve(true);
+        }
+      },
+      error: err => reject(err)
+    });
+
+    subscription.add(() => {
+      if (!resolved) {
+        reject(new Error("Promise not resolved."));
+      }
+      subscription.unsubscribe();
+    });
+  });
 }
 
 /**

@@ -1,4 +1,4 @@
-import { BehaviorSubject, Observable, every, firstValueFrom, from, race, take, takeWhile, timer } from "rxjs";
+import { BehaviorSubject, Observable, OperatorFunction, every, from, race, take, timer } from "rxjs";
 
 /**
  * A utility class for tracking the execution status of Observables.
@@ -33,28 +33,13 @@ export class Tracker {
   /**
    * Tracks the execution status of the provided Observable.
    * @param {Observable<any>} observable - The Observable to track.
-   * @returns {Promise<boolean>} An Observable that emits a boolean indicating if the tracked Observable has been executed.
+   * @returns {void} This method does not return a value.
    */
-  track(observable: Observable<any>): Promise<boolean> {
-    /**
-     * BehaviorSubject to track the execution status of the Observable.
-     * @type {BehaviorSubject<boolean>}
-     */
-    const subject = new BehaviorSubject<boolean>(false);
-    this.entries.set(observable, subject);
-
-    observable.pipe(
-      takeWhile(() => subject.value === false) // Unsubscribe when subject completes
-    ).subscribe({
-      next: () => subject.next(true), // Emit true on next emission
-      error: (error) => {
-        subject.error(error); // Propagate errors
-        subject.complete();
-      },
-      complete: () => subject.complete(),
-    });
-
-    return firstValueFrom(subject);
+  track(observable: Observable<any>): void {
+    if (!this.entries.has(observable)) {
+      const subject = new BehaviorSubject<boolean>(false);
+      this.entries.set(observable, subject);
+    }
   }
 
   /**
@@ -107,3 +92,31 @@ export class Tracker {
     });
   }
 }
+
+/**
+ * Creates an observable that mirrors the source observable with an additional
+ * side effect function `onExecuted` executed after each emitted value.
+ * @param {Observable} source The source observable to mirror.
+ * @param {Function} onExecuted The function to execute after each value is emitted.
+ * @returns {Observable} The new observable with the side effect.
+ */
+export function withStatusTracking(onExecuted = () => {}): OperatorFunction<any, any> {
+  return source => new Observable(observer => {
+    const subscription = source.subscribe({
+      async next(value) {
+        await observer.next(value);
+        onExecuted();
+      },
+      error(err) {
+        observer.error(err);
+      },
+      complete() {
+        observer.complete();
+      }
+    });
+
+    // Unsubscribe on unsubscribe
+    return () => subscription.unsubscribe();
+  });
+}
+

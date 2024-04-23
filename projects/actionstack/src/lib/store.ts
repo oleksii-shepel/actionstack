@@ -1,10 +1,11 @@
 import { InjectionToken, Injector, Type, inject } from "@angular/core";
-import { BehaviorSubject, EMPTY, Observable, Subject, Subscription, catchError, concatMap, distinctUntilChanged, filter, finalize, firstValueFrom, from, ignoreElements, map, mergeMap, of, scan, take, tap } from "rxjs";
+import { BehaviorSubject, EMPTY, Observable, Subject, Subscription, catchError, concatMap, distinctUntilChanged, filter, finalize, from, ignoreElements, map, mergeMap, of, scan, tap } from "rxjs";
 import { action, bindActionCreators } from "./actions";
 import { isValidMiddleware } from "./hash";
+import { Lock } from "./lock";
 import { starter } from "./starter";
-import { CustomAsyncSubject } from "./subject";
-import { Tracker } from "./tracker";
+import { CustomAsyncSubject, waitFor } from "./subject";
+import { Tracker, withStatusTracking } from "./tracker";
 import { Action, AnyFn, AsyncReducer, FeatureModule, MainModule, MetaReducer, ProcessingStrategy, Reducer, SideEffect, StoreEnhancer, Tree, isAction, isPlainObject, kindOf } from "./types";
 
 export { createStore as store };
@@ -100,7 +101,7 @@ export class Store {
   protected modules: FeatureModule[] = [];
   protected pipeline = {
     middleware: [] as any[],
-    reducer: async (state: any = {}, action: Action<any>) => state as AsyncReducer,
+    reducer: ((state: any = {}, action: Action<any>) => state) as AsyncReducer,
     dependencies: {} as Tree<Type<any> | InjectionToken<any>>,
     strategy: "exclusive" as ProcessingStrategy
   };
@@ -109,10 +110,10 @@ export class Store {
   protected currentState = new CustomAsyncSubject<any>();
   protected isProcessing = new BehaviorSubject<boolean>(false);
   protected subscription = Subscription.EMPTY;
-  protected systemActions: Record<keyof typeof systemActions, any> = { ...systemActions };
-  protected settings = Object.assign({}, new StoreSettings(), inject(StoreSettings));
+  protected systemActions = { ...systemActions };
+  protected settings = { ...new StoreSettings(), ...inject(StoreSettings) };
   protected tracker = new Tracker();
-
+  protected lock = new Lock();
   /**
    * Creates a new store instance with the provided mainModule and optional enhancer.
    * @param {MainModule} mainModule - The main module containing middleware, reducer, dependencies, and strategy.
@@ -132,19 +133,22 @@ export class Store {
       let store = new Store();
 
       // Assign mainModule properties to store
-      mainModule = Object.assign(store.mainModule, mainModule);
+      mainModule = {...store.mainModule, ...mainModule};
       store.mainModule = mainModule;
 
       // Configure store pipeline
-      store.pipeline = Object.assign(store.pipeline, {
+      store.pipeline = {...store.pipeline, ...{
         middleware: Array.from(mainModule.middleware ?? []),
         reducer: store.combineReducers({[mainModule.slice!]: mainModule.reducer}),
-        dependencies: Object.assign({}, mainModule.dependencies),
-        strategy: mainModule.strategy,
-      });
+        dependencies: {...mainModule.dependencies},
+        strategy: mainModule.strategy!,
+      }};
 
       // Apply middleware
       store.applyMiddleware();
+
+      // Bind system actions
+      store.systemActions = bindActionCreators(systemActions, (action: Action<any>) => store.settings.dispatchSystemActions && store.dispatch(action));
 
       // Create action stream observable
       let action$ = store.actionStream.asObservable();
@@ -152,17 +156,16 @@ export class Store {
       // Subscribe to action stream and process actions
       store.subscription = action$.pipe(
         scan((acc, action: any) => ({count: acc.count + 1, action}), {count: 0, action: undefined}),
-        concatMap(async ({count, action}: any) => (count === 1) ? (console.log("%cYou are using ActionStack. Happy coding! 🎉", "font-weight: bold;"),
-          await store.updateState("@global", async () => await store.setupReducer(), action)) : action),
+        concatMap(async ({count, action}: any) => (count === 1) ? (
+          console.log("%cYou are using ActionStack. Happy coding! 🎉", "font-weight: bold;"),
+          await store.currentState.next(await store.setupReducer()),
+          store.systemActions.storeInitialized(),
+          action) : action),
         store.processAction()
       ).subscribe();
 
-      // Bind system actions
-      store.systemActions = bindActionCreators(systemActions, (action: Action<any>) => store.settings.dispatchSystemActions && store.dispatch(action));
-
       // Initialize state and mark store as initialized
       store.systemActions.initializeState();
-      store.systemActions.storeInitialized();
 
       return store;
     }
@@ -197,6 +200,14 @@ export class Store {
     }
 
     this.actionStream.next(action);
+  }
+
+  /**
+   * Waits for the store to become idle.
+   * @returns {Promise<boolean>} A promise that resolves to true when the store is idle (not processing any actions), or false if the store completes without becoming idle.
+   */
+  waitForIdle(): Promise<boolean> {
+    return waitFor(this.isProcessing.asObservable(), value => value === false);
   }
 
   /**
@@ -294,12 +305,13 @@ export class Store {
       throw new Error("Unsupported type of slice parameter");
     }
 
+    this.tracker.reset();
+
     let stateUpdated = this.currentState.next(newState);
     let actionHandled = this.currentAction.next(action);
 
     if (this.settings.awaitStatePropagation) {
       await Promise.allSettled([stateUpdated, actionHandled, this.tracker.checkAllExecuted()]);
-      this.tracker.reset();
     }
 
     return newState;
@@ -550,7 +562,8 @@ export class Store {
       dispatch: async (action: any) => await dispatch(action),
       isProcessing: this.isProcessing,
       dependencies: () => this.pipeline.dependencies,
-      strategy: () => this.pipeline.strategy
+      strategy: () => this.pipeline.strategy,
+      lock: this.lock
     };
 
     const middlewareAPI = {
@@ -568,21 +581,6 @@ export class Store {
   }
 
   /**
-   * Processes system actions using the provided operator.
-   * @param {(obs: Observable<any>) => Observable<any>} operator - The operator function to apply on the observable stream.
-   * @returns {Promise<void>} A promise that resolves after processing the system action.
-   * @protected
-   */
-  protected processSystemAction(operator: (obs: Observable<any>) => Observable<any>) {
-    return (async() => await firstValueFrom(this.isProcessing.pipe(filter(value => value === false),
-      tap(() => this.isProcessing.next(true)),
-      operator,
-      catchError(error => { console.warn(error.message); return EMPTY; }),
-      finalize(() => this.isProcessing.next(false))
-    )))();
-  }
-
-  /**
    * Extends the observable stream with the provided side effects.
    * @param {...SideEffect[]} args - The side effect functions to extend the stream.
    * @returns {Observable<any>} An observable stream extended with the specified side effects.
@@ -592,27 +590,25 @@ export class Store {
     const dependencies = this.pipeline.dependencies;
     const mapMethod = this.pipeline.strategy === "concurrent" ? mergeMap : concatMap;
 
-    const effects$: Observable<any> = this.isProcessing.pipe(
-      filter(value => value === false),
-      take(1),
+    const effects$: Observable<any> = from(this.waitForIdle()).pipe(
       tap(() => this.systemActions.effectsRegistered(args)),
-      concatMap(() => this.currentAction.asObservable().pipe(() => from([...args]).pipe(
+      tap(() => this.tracker.track(effects$)),
+      concatMap(() => this.currentAction.asObservable().pipe(
+        concatMap(() => from([...args]).pipe(
           // Combine side effects and map in a single pipe
           mapMethod(sideEffect => sideEffect(this.currentAction.asObservable(), this.currentState.asObservable(), dependencies) as Observable<Action<any>>),
           // Flatten child actions and dispatch directly
           mergeMap((childAction: any) =>
             isAction(childAction) ? of(childAction).pipe(tap(this.dispatch)) : EMPTY
           )
-        )
+        )),
+        withStatusTracking(() => this.tracker.setStatus(effects$, true))
       )),
-      tap(() => this.tracker.setStatus(effects$, true)),
       finalize(() => {
         this.tracker.remove(effects$);
         this.systemActions.effectsUnregistered(args)
       })
     );
-
-    this.tracker.track(effects$);
     return effects$;
   }
 
@@ -620,61 +616,78 @@ export class Store {
    * Loads a feature module into the store.
    * @param {FeatureModule} module - The feature module to load.
    * @param {Injector} injector - The injector to use for dependency injection.
-   * @returns {Store} The store instance with the loaded module.
+   * @returns {Promise<void>}
    */
-  loadModule(module: FeatureModule, injector: Injector) {
-    this.processSystemAction((obs) => obs.pipe(
-      tap(() => {
-        // Check if the module already exists in the this's modules
-        if (this.modules.some(m => m.slice === module.slice)) {
-          // If the module already exists, return the this without changes
-          return;
-        }
-        // Create a new array with the module added to the this's modules
-        const newModules = [...this.modules, module];
+  async loadModule(module: FeatureModule, injector: Injector): Promise<void> {
+    // Check if the module already exists
+    if (this.modules.some(m => m.slice === module.slice)) {
+      return; // Module already exists, return without changes
+    }
 
-        // Return a new this with the updated properties
-        this.modules = newModules;
+    await this.lock.acquire();
+    try {
+      await this.waitForIdle();
 
-        // Inject dependencies
-        this.injectDependencies(injector);
-      }),
-      concatMap(async () => await this.updateState("@global", async (state) => await this.setupReducer(state), systemActions.updateState())),
-      tap(() => this.systemActions.moduleLoaded(module)),
-    ));
+      // Create a new array with the module added
+      const newModules = [...this.modules, module];
 
-    return this;
+      // Update internal state
+      this.modules = newModules;
+
+      // Inject dependencies
+      await this.injectDependencies(injector);
+
+      // Update global state with setup reducer (assuming setupReducer is async)
+      await this.updateState("@global", async (state) => await this.setupReducer(state));
+
+      // Dispatch module loaded action
+      this.systemActions.moduleLoaded(module);
+    } finally {
+      this.lock.release();
+    }
   }
 
   /**
    * Unloads a feature module from the store.
    * @param {FeatureModule} module - The feature module to unload.
    * @param {boolean} [clearState=false] - A flag indicating whether to clear the module's state.
-   * @returns {Store} The store instance with the unloaded module
+   * @returns {Promise<void>}
    */
-  unloadModule(module: FeatureModule, clearState: boolean = false) {
-    this.processSystemAction((obs) => obs.pipe(
-      tap(() => {
-        // Create a new array with the module removed from the this's modules
-        const newModules = this.modules.filter(m => m.slice !== module.slice);
+  async unloadModule(module: FeatureModule, clearState: boolean = false): Promise<void> {
+    // Find the module index in the modules array
+    const moduleIndex = this.modules.findIndex(m => m.slice === module.slice);
 
-        // Return a new this with the updated properties
-        this.modules = newModules;
+    // Check if the module exists
+    if (moduleIndex === -1) {
+      console.warn(`Module ${module.slice} not found, cannot unload.`);
+      return; // Module not found, nothing to unload
+    }
 
-        // Eject dependencies
-        this.ejectDependencies(module);
-      }),
-      concatMap(async () => await this.updateState("@global", async (state) => {
+    await this.lock.acquire();
+    try {
+      await this.waitForIdle();
+
+      // Remove the module from the internal state
+      this.modules.splice(moduleIndex, 1);
+
+      // Eject dependencies
+      await this.ejectDependencies(module);
+
+      // Update global state with optional state clearing
+      await this.updateState("@global", async (state) => {
         if (clearState) {
-          state = { ...state };
-          delete state[module.slice];
+          // Create a copy and delete the module's slice from state
+          return { ...state, [module.slice]: undefined };
+        } else {
+          return await this.setupReducer(state); // No state clearing
         }
-        return await this.setupReducer(state);
-      }, systemActions.initializeState())),
-      tap(() => this.systemActions.moduleUnloaded(module)),
-    ));
+      });
 
-    return this;
+      // Dispatch module unloaded action
+      this.systemActions.moduleUnloaded(module);
+    } finally {
+      this.lock.release();
+    }
   }
 }
 
