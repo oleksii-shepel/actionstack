@@ -1,7 +1,7 @@
 {
   "name": "@actioncrew/actionstack",
-  "version": "1.0.12",
-  "description": "State management library",
+  "version": "1.0.20",
+  "description": "State management library [Black Edition]",
   "license": "MIT",
   "keywords": [
     "RxJS",
@@ -10,11 +10,12 @@
     "Redux",
     "Angular",
     "state management",
-    "store"
+    "store",
+    "minified",
+    "well-tuned"
   ],
   "peerDependencies": {
     "@angular/core": ">=14.0.0",
-    "@angular/forms": ">=14.0.0",
     "rxjs": ">=7.5.0"
   },
   "devDependencies": {

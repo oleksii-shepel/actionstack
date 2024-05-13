@@ -1,5 +1,6 @@
 import { ElementRef, Injectable, OnDestroy, inject } from "@angular/core";
-import { Observable, Subscription } from "rxjs";
+import { Observable } from "rxjs/internal/Observable";
+import { Subscription } from "rxjs/internal/Subscription";
 import { StoreModule } from "./module";
 import { Store } from "./store";
 import { Action, Reducer, SideEffect, SliceStrategy } from "./types";
@@ -60,8 +61,8 @@ export class Slice implements OnDestroy {
    */
   setup(opts: SliceOptions): void {
     this.opts = Object.assign(this.opts, opts);
-    this.opts.effects && this.opts.effects.length && (this.subscription = this.store.extend(...this.opts.effects as any).subscribe());
-    this.opts.slice && this.opts.reducer && this.store.loadModule({
+    this.opts.effects && this.opts.effects.length > 0 && (this.subscription = this.store.extend(...this.opts.effects as any).subscribe());
+    this.opts.slice !== undefined && this.opts.reducer && this.store.loadModule({
       slice: this.opts.slice,
       dependencies: this.opts.dependencies,
       reducer: this.opts.reducer
@@ -93,6 +94,6 @@ export class Slice implements OnDestroy {
    */
   ngOnDestroy(): void {
     this.subscription.unsubscribe();
-    this.opts.slice && this.opts.reducer && this.store.unloadModule({slice: this.opts.slice, reducer: this.opts.reducer}, this.opts.strategy === "temporary" ? true : false);
+    this.opts.slice !== undefined && this.opts.reducer && this.store.unloadModule({slice: this.opts.slice, reducer: this.opts.reducer}, this.opts.strategy === "temporary" ? true : false);
   }
 }

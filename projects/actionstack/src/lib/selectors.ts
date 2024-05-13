@@ -1,6 +1,8 @@
-import { Observable, distinctUntilChanged, map, shareReplay } from "rxjs";
-import { sequential } from "./lock";
-import { ProjectionFunction, SelectorFunction } from "./types";
+import { Observable } from "rxjs/internal/Observable";
+import { Subscription } from "rxjs/internal/Subscription";
+import { EMPTY } from "./operators";
+import { TrackableObservable, Tracker } from "./tracker";
+import { Observer, ProjectionFunction, SelectorFunction } from "./types";
 
 export {
   createFeatureSelector as featureSelector,
@@ -21,28 +23,19 @@ export {
 function createFeatureSelector<U = any, T = any> (
   slice: keyof T | string[]
 ): (state$: Observable<T>) => Observable<U> {
-  return (state$: Observable<T>) => state$.pipe(
-    /**
-     * Applies the map operator to transform the state object.
-     * - Checks if the slice is an array (representing a path of keys).
-     *   - If it's an array, uses reduce to navigate through the state object using each key.
-     *   - If it's not an array (a single key), retrieves the value of that key from the state object.
-     */
-    map(state => (Array.isArray(slice))
+  let lastValue: U | undefined;
+  return (source: Observable<T>) => new Observable<U>(subscriber => {
+    subscriber.next(lastValue!);
+    const subscription = source.subscribe((state: T) => {
+      const selectedValue = (Array.isArray(slice)
       ? slice.reduce((acc, key) => (acc && Array.isArray(acc) ? acc[parseInt(key)] : (acc as any)[key]) || undefined, state)
-      : state && state[slice]),
-    /**
-     * Applies the distinctUntilChanged operator to ensure the observable only emits a new value if it's different from the previous value.
-     */
-    distinctUntilChanged(),
-    /**
-     * Applies the shareReplay operator to share a single subscription to the state observable and replay the latest value to multiple subscribers.
-     * - Options used:
-     *   - bufferSize: 1 - Limits the replay buffer to hold only the latest value.
-     *   - refCount: false - Keeps the observable running as long as there's at least one subscriber (be cautious, consider using takeUntil to avoid memory leaks).
-     */
-    shareReplay({bufferSize: 1, refCount: false})
-  ) as Observable<U>;
+      : state && state[slice]) as U;
+      lastValue = selectedValue;
+      subscriber.next(selectedValue);
+    });
+
+    return () => subscription.unsubscribe();
+  });
 }
 
 /**
@@ -61,72 +54,86 @@ function createFeatureSelector<U = any, T = any> (
  *                             * An options object (not currently implemented).
  * @returns A function that takes optional props and projection props as arguments and returns another function that takes the state observable as input and returns an observable of the projected data.
  */
-function createSelector<U = any, T = any> (
+function createSelector<U = any, T = any>(
   featureSelector$: ((state: Observable<T>) => Observable<U>) | "@global",
   selectors: SelectorFunction | SelectorFunction[],
   projectionOrOptions?: ProjectionFunction
-): (props?: any[] | any, projectionProps?: any) => (store: Observable<T>) => Observable<U> {
+): (props?: any[] | any, projectionProps?: any) => (state$: Observable<T>, tracker?: Tracker) => Observable<U> {
 
-  // Check if selectors is an array
   const isSelectorArray = Array.isArray(selectors);
-
-  // Extract the projection function if provided
   const projection = typeof projectionOrOptions === "function" ? projectionOrOptions : undefined;
 
-  // Validate arguments when selectors is an array
   if (isSelectorArray && !projection) {
-    throw new Error("Invalid parameters: When 'selectors' is an array, 'projection' function should be provided.");
+    console.warn("Invalid parameters: When 'selectors' is an array, 'projection' function should be provided.");
+    return () => () => EMPTY;
   }
 
-  // Return a function that takes props and projectionProps as arguments
   return (props?: any[] | any, projectionProps?: any) => {
-
-    // Validate prop lengths if using multiple selectors
     if(Array.isArray(props) && Array.isArray(selectors) && props.length !== selectors.length) {
-      throw new Error('Not all selectors are parameterized. The number of props does not match the number of selectors.');
+      console.warn('Not all selectors are parameterized. The number of props does not match the number of selectors.');
+      return () => EMPTY;
     }
 
-    // Return a function that takes the state observable as input
-    return (state$: Observable<T>) => {
+    let lastSliceState: any, emitted = false;
+    return (state$: Observable<T>, tracker?: Tracker) => {
+      const trackable = new TrackableObservable<U>((observer: Observer<U>) => {
+        let sliceState$: Observable<U>;
+        if (featureSelector$ === "@global") {
+          sliceState$ = state$ as any;
+        } else {
+          sliceState$ = (featureSelector$ as Function)(state$);
+        }
 
-      // Apply the feature selector or use the entire state
-      const sliceState$ = (featureSelector$ === "@global" ? state$ : (featureSelector$ as Function)(state$)).pipe(
+        const subscription: Subscription = sliceState$.subscribe(sliceState => {
+          if (sliceState === undefined) {
+            observer.next(undefined as U);
+            return;
+          }
 
-        // Map over the slice state
-        map(sliceState => {
-
-          // Handle undefined slice state
-          if (sliceState === undefined) { return sliceState; }
+          if (lastSliceState === sliceState) {
+            tracker && tracker.setStatus(trackable, true);
+            return;
+          } else {
+            lastSliceState = sliceState;
+          }
 
           let selectorResults: U[] | U;
+          try {
+            if (Array.isArray(selectors)) {
+              selectorResults = selectors.map((selector, index) => selector(sliceState, props[index]));
 
-          // Handle array of selectors
-          if (Array.isArray(selectors)) {
-            // Apply each selector to the slice state and corresponding prop
-            selectorResults = selectors.map((selector, index) => selector(sliceState, props[index]))
+              // Check if any result is undefined and emit undefined immediately
+              if (selectorResults.some(result => result === undefined)) {
+                subscription.unsubscribe(); // Unsubscribe immediately to prevent further emissions
+                observer.next(undefined as U);
+                return;
+              }
 
-            // Check if any selector result is undefined
-            return (selectorResults.some(result => result === undefined))
-              ? undefined as U  // Return undefined if any selector result is undefined
-              : projection ? projection(selectorResults, projectionProps) : selectorResults; // Apply projection or return results
+              // If all results are defined, continue with projection or emit results directly
+              observer.next(projection ? projection(selectorResults, projectionProps) : selectorResults);
+            } else {
+              selectorResults = selectors && selectors(sliceState, props);
 
-          } else {
-            // Handle single selector
-            selectorResults = selectors && selectors(sliceState, props);
-
-            // Check if single selector result is undefined
-            return (selectorResults === undefined)
-              ? undefined as U  // Return undefined if single selector result is undefined
-              : projection ? projection(projectionProps) : selectorResults; // Apply projection or return result
+              if (selectorResults === undefined) {
+                observer.next(undefined as U);
+                return;
+              }
+              observer.next(projection ? projection(projectionProps) : selectorResults);
+            }
+          } catch(error: any) {
+            console.warn("Error during selector execution:", error.message);
+            tracker && tracker.setStatus(trackable, true);
           }
-        })
-      );
+        });
 
-      // Return the observable with projected or selected data
-      return sliceState$;
+        return () => subscription.unsubscribe();
+      }, tracker);
+
+      return trackable as Observable<U>;
     };
   };
 }
+
 
 /**
  * Creates a selector function for composing smaller selectors and projecting their results, handling asynchronous operations within selectors.
@@ -144,70 +151,123 @@ function createSelector<U = any, T = any> (
  *                             * An options object (not currently implemented).
  * @returns A function that takes optional props and projection props as arguments and returns another function that takes the state observable as input and returns an observable of the projected data.
  */
-function createSelectorAsync<U = any, T = any> (
+function createSelectorAsync<U = any, T = any>(
   featureSelector$: ((state: Observable<T>) => Observable<U>) | "@global",
   selectors: SelectorFunction | SelectorFunction[],
   projectionOrOptions?: ProjectionFunction
-): (props?: any[] | any, projectionProps?: any) => (store: Observable<T>) => Observable<U> {
+): (props?: any[] | any, projectionProps?: any) => (state$: Observable<T>, tracker?: Tracker) => Observable<U> {
 
-  // Check if selectors is an array
   const isSelectorArray = Array.isArray(selectors);
-
-  // Extract the projection function if provided
   const projection = typeof projectionOrOptions === "function" ? projectionOrOptions : undefined;
 
-  // Validate arguments when selectors is an array
   if (isSelectorArray && !projection) {
-    throw new Error("Invalid parameters: When 'selectors' is an array, 'projection' function should be provided.");
+    console.warn("Invalid parameters: When 'selectors' is an array, 'projection' function should be provided.");
+    return () => () => EMPTY;
   }
 
-  // Return a function that takes props and projectionProps as arguments
   return (props?: any[] | any, projectionProps?: any) => {
-
-    // Validate prop lengths if using multiple selectors
-    if(Array.isArray(props) && Array.isArray(selectors) && props.length !== selectors.length) {
-      throw new Error('Not all selectors are parameterized. The number of props does not match the number of selectors.');
+    if (Array.isArray(props) && Array.isArray(selectors) && props.length !== selectors.length) {
+      console.warn('Not all selectors are parameterized. The number of props does not match the number of selectors.');
+      return () => EMPTY;
     }
 
-    // Return a function that takes the state observable as input
-    return (state$: Observable<T>) => {
+    let lastSliceState: any;
+    return (state$: Observable<T>, tracker?: Tracker) => {
+      const trackable = new TrackableObservable<U>((observer: Observer<U>) => {
 
-      // Apply the feature selector or use the entire state
-      const sliceState$ = (featureSelector$ === "@global" ? state$ : (featureSelector$ as Function)(state$)).pipe(
+        let unsubscribed = false;
+        let didCancel = false;
 
-        // Use concatMap to handle asynchronous operations within selectors
-        sequential(async sliceState => {
+        const runSelectors = async (sliceState: any) => {
+          if (sliceState === undefined) {
+            observer.next(undefined as any);
+            return;
+          }
 
-          // Handle undefined slice state
-          if (sliceState === undefined) { return sliceState; }
+          if (lastSliceState === sliceState) {
+            tracker && tracker.setStatus(trackable, true);
+            return;
+          } else {
+            lastSliceState = sliceState;
+          }
 
           let selectorResults: U[] | U;
 
-          // Handle array of selectors
-          if (Array.isArray(selectors)) {
-            // Use Promise.all to wait for all async selectors to resolve
-            selectorResults = await Promise.all(selectors.map((selector, index) => selector(sliceState, props[index])));
+          try {
+            if (Array.isArray(selectors)) {
+              const promises = selectors.map(async (selector, index) => {
+                if (unsubscribed || didCancel) {
+                  tracker && tracker.setStatus(trackable, true);
+                  return;
+                }
+                return selector(sliceState, props ? props[index] : undefined);
+              });
 
-            // Check if any selector result is undefined
-            return (selectorResults.some(result => result === undefined))
-              ? undefined as U  // Return undefined if any selector result is undefined
-              : projection ? projection(selectorResults, projectionProps) : selectorResults; // Apply projection or return results
+              selectorResults = await Promise.all(promises);
 
-          } else {
-            // Handle single selector
-            // Await the result of the single selector function (can be Promise or Observable)
-            selectorResults = await selectors(sliceState, props);
+              if (unsubscribed || didCancel) {
+                tracker && tracker.setStatus(trackable, true);
+                return;
+              }
 
-            // Check if single selector result is undefined
-            return (selectorResults === undefined)
-              ? undefined as U  // Return undefined if single selector result is undefined
-              : projection ? projection(selectorResults, projectionProps) : selectorResults; // Apply projection or return result
+              const isUndefined = selectorResults.some(result => result === undefined);
+
+              observer.next(
+                isUndefined
+                  ? undefined
+                  : projection
+                    ? projection(selectorResults as U[], projectionProps)
+                    : selectorResults
+              );
+            } else {
+              selectorResults = await selectors(sliceState, props);
+
+              if (unsubscribed || didCancel) {
+                tracker && tracker.setStatus(trackable, true);
+                return;
+              }
+
+              observer.next(
+                selectorResults === undefined
+                  ? undefined
+                  : projection
+                    ? projection(selectorResults, projectionProps)
+                    : selectorResults
+              );
+            }
+          } catch (error: any) {
+            if (!unsubscribed && !didCancel) {
+              console.warn("Error during selector execution:", error.message);
+              observer.complete();
+              tracker && tracker.setStatus(trackable, true);
+            }
           }
-        })
-      );
+        };
 
-      // Return the observable with projected or selected data
-      return sliceState$;
+        const subscription = (featureSelector$ === "@global" ? state$ : (featureSelector$(state$)) as any).subscribe({
+          next: (sliceState: any) => runSelectors(sliceState),
+          error: (error: any) => {
+            if (!unsubscribed && !didCancel) {
+              console.warn("Error during selector execution:", error.message);
+              observer.complete();
+              tracker && tracker.setStatus(trackable, true);
+            }
+          },
+          complete: () => {
+            if (!unsubscribed && !didCancel) {
+              observer.complete();
+              tracker && tracker.setStatus(trackable, true);
+            }
+          },
+        });
+
+        return () => {
+          unsubscribed = true;
+          subscription.unsubscribe();
+        };
+      }, tracker);
+
+      return trackable;
     };
   };
 }

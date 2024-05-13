@@ -1,4 +1,3 @@
-import { Observable } from "rxjs";
 
 /**
  * Implements a lock using promises to ensure mutual exclusion.
@@ -26,13 +25,12 @@ export class Lock {
    *                             or resolves later when the lock becomes available for the caller.
    */
   public async acquire(): Promise<void> {
-    // Return a promise that resolves immediately if not locked
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       if (!this.isLocked) {
         this.isLocked = true;
-        resolve();
+        resolve(); // Lock acquired, resolve the promise
       } else {
-        this.queue.push(resolve);
+        this.queue.push(() => resolve()); // Add resolve to queue
       }
     });
   }
@@ -40,37 +38,12 @@ export class Lock {
   /**
    * Releases the lock, allowing the next waiting promise in the queue to acquire it.
    */
-  public release(): void {
-    const nextResolve = this.queue.shift();
-    if (nextResolve) {
-      // Unlock the next promise in the queue
-      nextResolve();
-    } else {
-      // If the queue is empty, set isLocked to false
-      this.isLocked = false;
-    }
-  }
-}
-
-export function sequential<T, R>(project: (value: T, index: number) => Promise<R>): (source: Observable<T>) => Observable<R> {
-  let lock = new Lock();
-
-  return (source: Observable<T>) => new Observable<R>(observer => {
-
-    let index = 0;
-    const subscription = source.subscribe({
-      next(value: any) {
-        lock.acquire()
-          .then(() => { observer.next(value); return value;})
-          .then((value) => project(value, index++))
-          .finally(() => lock.release());
-      },
-      error(err) { observer.error(err); lock.release(); },
-      complete() { observer.complete(); lock.release(); }
-    });
-
-    return () => {
-      subscription.unsubscribe();
+  release() {
+    this.isLocked = false;
+    // Process the waiting requests (if any)
+    if (this.queue.length > 0) {
+      const nextResolve = this.queue.shift()!;
+      nextResolve(); // Resolve the first waiting promise
     };
-  });
+  }
 }

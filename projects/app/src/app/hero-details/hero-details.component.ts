@@ -1,9 +1,9 @@
 import { Location } from '@angular/common';
 import { Component, OnInit } from '@angular/core';
 import { ActivatedRoute } from '@angular/router';
+import { Observable, Subscription, map, tap } from 'rxjs';
 
 import { Store } from '@actioncrew/actionstack';
-import { Observable } from 'rxjs';
 import { Hero } from '../hero';
 import { heroSelector, loadHero } from './hero-details.slice';
 
@@ -13,26 +13,31 @@ import { heroSelector, loadHero } from './hero-details.slice';
   styleUrls: [ './hero-details.component.css' ]
 })
 export class HeroDetailsComponent implements OnInit {
-  hero$: Observable<Hero | undefined>;
+  hero$!: Observable<Hero | undefined>;
+  subscription: Subscription | undefined;
 
   constructor(
     private store: Store,
     private route: ActivatedRoute,
     private location: Location
-  ) {
-    this.hero$ = this.store.select(heroSelector());
-  }
+  ) {}
 
   ngOnInit(): void {
-    this.loadHero();
-  }
+    this.hero$ = this.store.select(heroSelector());
 
-  loadHero(): void {
-    const id = Number(this.route.snapshot.paramMap.get('id'));
-    this.store.dispatch(loadHero(id));
+    this.subscription = this.route.paramMap.pipe(
+      map(params => Number(params.get('id'))),
+      tap(id => this.store.dispatch(loadHero(id)))
+    ).subscribe();
   }
 
   goBack(): void {
     this.location.back();
+  }
+
+  ngOnDestroy() {
+    if(this.subscription) {
+      this.subscription.unsubscribe();
+    }
   }
 }

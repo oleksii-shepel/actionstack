@@ -1,12 +1,14 @@
 import { InjectionToken, Injector, Type, inject } from "@angular/core";
-import { BehaviorSubject, EMPTY, Observable, Subject, Subscription, catchError, concatMap, distinctUntilChanged, filter, finalize, from, ignoreElements, map, mergeMap, of, scan, tap } from "rxjs";
+import { BehaviorSubject } from "rxjs/internal/BehaviorSubject";
+import { Observable } from "rxjs/internal/Observable";
+import { Subject } from "rxjs/internal/Subject";
+import { Subscription } from "rxjs/internal/Subscription";
 import { action, bindActionCreators } from "./actions";
-import { isValidMiddleware } from "./hash";
 import { Lock } from "./lock";
+import { EMPTY, concat, concatMap, merge, waitFor } from "./operators";
 import { starter } from "./starter";
-import { CustomAsyncSubject, waitFor } from "./subject";
-import { Tracker, withStatusTracking } from "./tracker";
-import { Action, AnyFn, AsyncReducer, FeatureModule, MainModule, MetaReducer, ProcessingStrategy, Reducer, SideEffect, StoreEnhancer, Tree, isAction, isPlainObject, kindOf } from "./types";
+import { TrackableObservable, Tracker } from "./tracker";
+import { Action, AnyFn, AsyncReducer, FeatureModule, MainModule, MetaReducer, Observer, ProcessingStrategy, Reducer, SideEffect, StoreEnhancer, Tree, isAction, isPlainObject, kindOf } from "./types";
 
 export { createStore as store };
 
@@ -16,7 +18,7 @@ export { createStore as store };
  * This class defines properties that control various behaviors of a store for managing application state.
  */
 export class StoreSettings {
-  dispatchSystemActions = false;
+  dispatchSystemActions = true;
   awaitStatePropagation = true;
   enableMetaReducers = true;
   enableAsyncReducers = true;
@@ -106,14 +108,15 @@ export class Store {
     strategy: "exclusive" as ProcessingStrategy
   };
   protected actionStream = new Subject<Action<any>>();
-  protected currentAction = new CustomAsyncSubject<Action<any>>();
-  protected currentState = new CustomAsyncSubject<any>();
+  protected currentAction = new Subject<Action<any>>();
+  protected currentState = new BehaviorSubject<any>(undefined);
   protected isProcessing = new BehaviorSubject<boolean>(false);
   protected subscription = Subscription.EMPTY;
   protected systemActions = { ...systemActions };
   protected settings = { ...new StoreSettings(), ...inject(StoreSettings) };
   protected tracker = new Tracker();
   protected lock = new Lock();
+
   /**
    * Creates a new store instance with the provided mainModule and optional enhancer.
    * @param {MainModule} mainModule - The main module containing middleware, reducer, dependencies, and strategy.
@@ -151,21 +154,24 @@ export class Store {
       store.systemActions = bindActionCreators(systemActions, (action: Action<any>) => store.settings.dispatchSystemActions && store.dispatch(action));
 
       // Create action stream observable
-      let action$ = store.actionStream.asObservable();
-
       // Subscribe to action stream and process actions
-      store.subscription = action$.pipe(
-        scan((acc, action: any) => ({count: acc.count + 1, action}), {count: 0, action: undefined}),
-        concatMap(async ({count, action}: any) => (count === 1) ? (
-          console.log("%cYou are using ActionStack. Happy coding! 🎉", "font-weight: bold;"),
-          await store.currentState.next(await store.setupReducer()),
-          store.systemActions.storeInitialized(),
-          action) : action),
+      let count = 0;
+
+      store.subscription = store.actionStream.pipe(
+        concatMap(async (action: any) => {
+          if (count === 0) {
+            console.log("%cYou are using ActionStack. Happy coding! 🎉", "font-weight: bold;");
+            await store.currentState.next(await store.setupReducer());
+          }
+          count++;
+          return action;
+        }),
         store.processAction()
-      ).subscribe();
+      ).subscribe(() => {});
 
       // Initialize state and mark store as initialized
       store.systemActions.initializeState();
+      store.systemActions.storeInitialized();
 
       return store;
     }
@@ -183,31 +189,41 @@ export class Store {
     return storeCreator(mainModule);
   }
 
-  /**
+    /**
    * Dispatches an action to be processed by the store's reducer.
    * @param {Action<any>} action - The action to dispatch.
    * @throws {Error} Throws an error if the action is not a plain object, does not have a defined "type" property, or if the "type" property is not a string.
    */
-  dispatch(action: Action<any>) {
+  dispatch(action: Action<any> | any) {
     if (!isPlainObject(action)) {
-      throw new Error(`Actions must be plain objects. Instead, the actual type was: '${kindOf(action)}'. You may need to add middleware to your setup to handle dispatching custom values.`);
+      console.warn(`Actions must be plain objects. Instead, the actual type was: '${kindOf(action)}'. You may need to add middleware to your setup to handle dispatching custom values.`);
+      return;
     }
     if (typeof action.type === "undefined") {
-      throw new Error('Actions may not have an undefined "type" property. You may have misspelled an action type string constant.');
+      console.warn('Actions may not have an undefined "type" property. You may have misspelled an action type string constant.');
+      return;
     }
     if (typeof action.type !== "string") {
-      throw new Error(`Action "type" property must be a string. Instead, the actual type was: '${kindOf(action.type)}'. Value was: '${action.type}' (stringified)`);
+      console.warn(`Action "type" property must be a string. Instead, the actual type was: '${kindOf(action.type)}'. Value was: '${action.type}' (stringified)`);
+      return;
     }
 
     this.actionStream.next(action);
   }
 
   /**
-   * Waits for the store to become idle.
-   * @returns {Promise<boolean>} A promise that resolves to true when the store is idle (not processing any actions), or false if the store completes without becoming idle.
+   * Executes a callback function after acquiring a lock and ensuring the system is idle.
+   * @param {keyof T | string[]} slice - The slice of state to execute the callback on.
+   * @param {(readonly state: ) => void} callback - The callback function to execute with the state.
+   * @returns {Promise<void>} A promise that resolves after executing the callback.
+   * @template T
    */
-  waitForIdle(): Promise<boolean> {
-    return waitFor(this.isProcessing.asObservable(), value => value === false);
+  exec<T = any>(slice: keyof T | string[], callback: (state:  Readonly<T>) => void | Promise<void>): Promise<void> {
+    const promise = this.lock.acquire()
+      .then(() => this.getState(slice))
+      .then(state => callback(state as any))
+      .finally(() => this.lock.release());
+    return promise;
   }
 
   /**
@@ -216,12 +232,26 @@ export class Store {
    * @param {*} [defaultValue] - The default value to use if the selected value is undefined.
    * @returns {Observable<any>} An observable stream with the selected value.
    */
-  select(selector: (obs: Observable<any>) => Observable<any>, defaultValue?: any): Observable<any> {
-    return selector(this.currentState.asObservable()).pipe(
-      map(value => value === undefined ? defaultValue : value),
-      filter(value => value !== undefined),
-      distinctUntilChanged());
+  select<T = any, R = any>(selector: (obs: Observable<T>, tracker?: Tracker) => Observable<R>, defaultValue?: any): Observable<R> {
+    let lastValue: any;
+    let selected$: TrackableObservable<R> | undefined;
+    return new TrackableObservable<R>((subscriber: Observer<R>) => {
+      const subscription = this.currentState.pipe((state) => (selected$ = selector(state, this.tracker) as TrackableObservable<R>)).subscribe(selectedValue => {
+        const filteredValue = selectedValue === undefined ? defaultValue : selectedValue;
+        if(filteredValue !== lastValue) {
+          Promise.resolve(subscriber.next(filteredValue))
+            .then(() => lastValue = filteredValue)
+            .finally(() => this.tracker.setStatus(selected$!, true));
+        } else {
+          this.tracker.setStatus(selected$!, true);
+        }
+      });
+
+      return () => subscription.unsubscribe();
+    }, this.tracker);
   }
+
+
 
   /**
    * Gets the current state or a slice of the state from the store.
@@ -230,7 +260,7 @@ export class Store {
    * @throws {Error} Throws an error if the slice parameter is of unsupported type.
    * @template T
    */
-  getState<T = any>(slice?: keyof T | string[]): any {
+  protected getState<T = any>(slice?: keyof T | string[]): any {
     if (this.currentState.value === undefined || slice === undefined || typeof slice === "string" && slice == "@global") {
       return this.currentState.value as T;
     } else if (typeof slice === "string") {
@@ -307,11 +337,19 @@ export class Store {
 
     this.tracker.reset();
 
-    let stateUpdated = this.currentState.next(newState);
-    let actionHandled = this.currentAction.next(action);
+    const next = async <T>(subject: Subject<T>, value: T): Promise<void> => {
+      return new Promise<void>(async (resolve) => {
+        await subject.next(value);
+        resolve();
+      });
+    };
+
+    let stateUpdated = next(this.currentState, newState);
+    let actionHandled = next(this.currentAction, action);
+    let effectsExecuted = this.tracker.allExecuted;
 
     if (this.settings.awaitStatePropagation) {
-      await Promise.allSettled([stateUpdated, actionHandled, this.tracker.checkAllExecuted()]);
+      await Promise.allSettled([stateUpdated, actionHandled, effectsExecuted]);
     }
 
     return newState;
@@ -527,22 +565,29 @@ export class Store {
    * @protected
    */
   protected processAction() {
-    return (source: Observable<Action<any>>) => {
-      return source.pipe(
-        concatMap(async (action: Action<any>) => {
-          try {
-            return await this.updateState("@global", async (state) => await this.pipeline.reducer(state, action), action);
-          } finally {
-            this.isProcessing.next(false);
+    return (source: Observable<Action<any>>) =>
+      new Observable<Action<any>>(subscriber => {
+
+        const subscription = source.pipe(
+          concatMap(async (action: Action<any>) => {
+            try {
+              return await this.updateState("@global", async (state) => await this.pipeline.reducer(state, action), action);
+            } finally {
+              this.isProcessing.next(false);
+            }
+          })
+        ).subscribe({
+          error: (error) => {
+            console.warn(error.message);
+            subscriber.complete(); // Complete the observable on error
+          },
+          complete: () => {
+            subscriber.complete(); // Complete the observable when the source completes
           }
-        }),
-        ignoreElements(),
-        catchError((error) => {
-          console.warn(error.message);
-          return EMPTY;
-        })
-      );
-    };
+        });
+
+        return () => subscription.unsubscribe();
+      });
   }
 
   /**
@@ -560,7 +605,6 @@ export class Store {
     const starterAPI = {
       getState: () => this.getState(),
       dispatch: async (action: any) => await dispatch(action),
-      isProcessing: this.isProcessing,
       dependencies: () => this.pipeline.dependencies,
       strategy: () => this.pipeline.strategy,
       lock: this.lock
@@ -572,9 +616,14 @@ export class Store {
     };
 
     // Build middleware chain
-    const chain = [starter(isValidMiddleware(starter.signature) ? starterAPI : middlewareAPI), ...this.pipeline.middleware.map(middleware => middleware(middlewareAPI))];
+    const chain = [starter(starterAPI), ...this.pipeline.middleware.map(middleware => middleware(middlewareAPI))];
+    const originalDispatch = this.dispatch.bind(this);
     // Compose middleware chain with dispatch function
-    dispatch = (chain.length === 1 ? chain[0] : chain.reduce((a, b) => (...args: any[]) => a(b(...args))))(this.dispatch.bind(this));
+    dispatch = (chain.length === 1 ? chain[0] : chain.reduce((a, b) => (...args: any[]) => a(b(...args))))(async (action: any) => {
+      this.isProcessing.next(true);
+      originalDispatch(action);
+      return await waitFor(this.isProcessing, value => value === false);
+    });
 
     this.dispatch = dispatch;
     return this;
@@ -586,29 +635,44 @@ export class Store {
    * @returns {Observable<any>} An observable stream extended with the specified side effects.
    * @protected
    */
-  extend(...args: SideEffect[]): Observable<any> {
+  extend<T>(...args: SideEffect[]): Observable<T> {
     const dependencies = this.pipeline.dependencies;
-    const mapMethod = this.pipeline.strategy === "concurrent" ? mergeMap : concatMap;
 
-    const effects$: Observable<any> = from(this.waitForIdle()).pipe(
-      tap(() => this.systemActions.effectsRegistered(args)),
-      tap(() => this.tracker.track(effects$)),
-      concatMap(() => this.currentAction.asObservable().pipe(
-        concatMap(() => from([...args]).pipe(
-          // Combine side effects and map in a single pipe
-          mapMethod(sideEffect => sideEffect(this.currentAction.asObservable(), this.currentState.asObservable(), dependencies) as Observable<Action<any>>),
-          // Flatten child actions and dispatch directly
-          mergeMap((childAction: any) =>
-            isAction(childAction) ? of(childAction).pipe(tap(this.dispatch)) : EMPTY
-          )
-        )),
-        withStatusTracking(() => this.tracker.setStatus(effects$, true))
-      )),
-      finalize(() => {
+    const effects$ = new TrackableObservable<T>((subscriber: Observer<T>) => {
+      let effectsSubscription: Subscription | undefined;
+      const unregisterEffects = () => {
+        if (effectsSubscription) {
+          effectsSubscription.unsubscribe();
+          effectsSubscription = undefined;
+        }
+        this.systemActions.effectsUnregistered(args);
+      };
+
+      this.tracker.track(effects$);
+
+      const sideEffects = args.map(sideEffect => sideEffect(this.currentAction, this.currentState, dependencies));
+      let effectsExecutedCount = 0;
+      effectsSubscription = (this.pipeline.strategy === "concurrent" ? merge : concat)(...sideEffects).subscribe({
+        next: (childAction: any) => {
+          if (isAction(childAction)) {
+            this.dispatch(childAction);
+          }
+          effectsExecutedCount++;
+          if(effectsExecutedCount === args.length) {
+            this.tracker.setStatus(effects$, true);
+          }
+        },
+        error: (err: any) => subscriber.error(err),
+        complete: () => { subscriber.complete() },
+      });
+
+      return () => {
+        unregisterEffects();
         this.tracker.remove(effects$);
-        this.systemActions.effectsUnregistered(args)
-      })
-    );
+      }
+    }, this.tracker);
+
+    this.systemActions.effectsRegistered(args);
     return effects$;
   }
 
@@ -618,33 +682,26 @@ export class Store {
    * @param {Injector} injector - The injector to use for dependency injection.
    * @returns {Promise<void>}
    */
-  async loadModule(module: FeatureModule, injector: Injector): Promise<void> {
+  loadModule(module: FeatureModule, injector: Injector): Promise<void> {
     // Check if the module already exists
     if (this.modules.some(m => m.slice === module.slice)) {
-      return; // Module already exists, return without changes
+      return Promise.resolve(); // Module already exists, return without changes
     }
 
-    await this.lock.acquire();
-    try {
-      await this.waitForIdle();
+    const promise = this.lock.acquire()
+      .then(() => {
+        // Create a new array with the module added
+        this.modules = [...this.modules, module];
 
-      // Create a new array with the module added
-      const newModules = [...this.modules, module];
+        // Inject dependencies
+        return this.injectDependencies(injector);
+      })
+      .then(() => this.updateState("@global", state => this.setupReducer(state)))
+      .finally(() => this.lock.release());
 
-      // Update internal state
-      this.modules = newModules;
-
-      // Inject dependencies
-      await this.injectDependencies(injector);
-
-      // Update global state with setup reducer (assuming setupReducer is async)
-      await this.updateState("@global", async (state) => await this.setupReducer(state));
-
-      // Dispatch module loaded action
-      this.systemActions.moduleLoaded(module);
-    } finally {
-      this.lock.release();
-    }
+    // Dispatch module loaded action
+    this.systemActions.moduleLoaded(module);
+    return promise;
   }
 
   /**
@@ -653,41 +710,36 @@ export class Store {
    * @param {boolean} [clearState=false] - A flag indicating whether to clear the module's state.
    * @returns {Promise<void>}
    */
-  async unloadModule(module: FeatureModule, clearState: boolean = false): Promise<void> {
+  unloadModule(module: FeatureModule, clearState: boolean = false): Promise<void> {
     // Find the module index in the modules array
     const moduleIndex = this.modules.findIndex(m => m.slice === module.slice);
 
     // Check if the module exists
     if (moduleIndex === -1) {
       console.warn(`Module ${module.slice} not found, cannot unload.`);
-      return; // Module not found, nothing to unload
+      return Promise.resolve(); // Module not found, nothing to unload
     }
 
-    await this.lock.acquire();
-    try {
-      await this.waitForIdle();
+    const promise = this.lock.acquire()
+      .then(() => {
+        // Remove the module from the internal state
+        this.modules.splice(moduleIndex, 1);
 
-      // Remove the module from the internal state
-      this.modules.splice(moduleIndex, 1);
-
-      // Eject dependencies
-      await this.ejectDependencies(module);
-
-      // Update global state with optional state clearing
-      await this.updateState("@global", async (state) => {
+        // Eject dependencies
+        return this.ejectDependencies(module);
+      })
+      .then(() => this.updateState("@global", async (state) => {
         if (clearState) {
-          // Create a copy and delete the module's slice from state
-          return { ...state, [module.slice]: undefined };
-        } else {
-          return await this.setupReducer(state); // No state clearing
+          state = { ...state };
+          delete state[module.slice];
         }
-      });
+        return await this.setupReducer(state);
+      }))
+      .finally(() => this.lock.release());
 
-      // Dispatch module unloaded action
-      this.systemActions.moduleUnloaded(module);
-    } finally {
-      this.lock.release();
-    }
+    // Dispatch module unloaded action
+    this.systemActions.moduleUnloaded(module);
+    return promise;
   }
 }
 
@@ -700,5 +752,3 @@ export class Store {
 export function createStore(mainModule: MainModule, enhancer?: StoreEnhancer) {
   return Store.create(mainModule, enhancer);
 }
-
-

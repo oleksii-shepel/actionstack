@@ -1,5 +1,5 @@
 import { InjectionToken, Type } from "@angular/core";
-import { Observable, isObservable } from "rxjs";
+import { Observable } from 'rxjs/internal/Observable';
 import { Store } from "./store";
 
 /**
@@ -27,6 +27,16 @@ export interface Action<T = any> {
  */
 export interface AsyncAction<T = any> {
   (...args: any[]): Promise<T>;
+}
+
+/**
+ * Represents an action creator.
+ * @template T The type of the action payload.
+ */
+export type ActionCreator<T = any> = ((...args: any[]) => Action<T> | AsyncAction<T>) & {
+  toString(): string;
+  type: string;
+  match(action: Action<T>): boolean;
 }
 
 /**
@@ -81,6 +91,41 @@ export interface Middleware {
   (store: any): (next: Function) => (action: Action<any>) => Promise<any>;
   signature?: string;
 }
+
+/**
+ * Represents an observer that receives notifications of values from an Observable.
+ * @interface
+ * @template T The type of the value being observed.
+ */
+export interface Observer<T> {
+  next: (value: T) => void;
+  error: (err: any) => void;
+  complete: () => void;
+}
+
+/**
+ * Represents an asynchronous observer that receives notifications of values from an Observable.
+ * @interface
+ * @template T The type of the value being observed.
+ */
+export interface AsyncObserver<T> {
+  next: (value: T) => Promise<void>;
+  error: (err: any) => Promise<void>;
+  complete: () => Promise<void>;
+}
+
+/**
+ * Interface representing an operator function for transforming observables.
+ *
+ * An operator function takes an input `Observable<T>` and returns an output `Observable<R>`.
+ *
+ * @typeParam T - The type of the input elements.
+ * @typeParam R - The type of the output elements.
+ */
+export interface OperatorFunction<T, R> {
+  (source: Observable<T>): Observable<R>
+}
+
 
 /**
  * Type alias for any function that takes any number of arguments and returns anything.
@@ -361,18 +406,6 @@ function isBoxed(value: any) {
 }
 
 /**
- * Checks if a value is a primitive type.
- *
- * This function checks if a value is `undefined`, `null`, or a non-object type.
- *
- * @param value - The value to check if it's primitive.
- * @returns boolean - True if the value is primitive, false otherwise.
- */
-function isPrimitive(value: any) {
-  return value === undefined || value === null || typeof value !== 'object';
-}
-
-/**
  * Checks if a value is a Promise object.
  *
  * This function uses a trick to identify promises. It resolves the value with `Promise.resolve` and compares the resolved value with the original value.
@@ -432,5 +465,15 @@ function isPlainObject(obj: any): boolean {
   return Object.getPrototypeOf(obj) === proto;
 }
 
-export { isAction, isAsync, isBoxed, isPlainObject, isPrimitive, kindOf };
+/**
+ * Tests to see if the object is an RxJS {@link Observable}
+ * @param obj the object to test
+ */
+function isObservable(obj: any): obj is Observable<unknown> {
+  // The !! is to ensure that this publicly exposed function returns
+  // `false` if something like `null` or `0` is passed.
+  return !!obj && (obj instanceof Observable || (typeof obj.lift === 'function' && typeof obj.subscribe === 'function'));
+}
+
+export { isAction, isAsync, isBoxed, isObservable, isPlainObject, isPromise, kindOf };
 
