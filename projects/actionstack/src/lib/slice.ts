@@ -1,10 +1,10 @@
-import { ElementRef, Injectable, OnDestroy, inject } from "@angular/core";
-import { Observable } from "rxjs/internal/Observable";
-import { Subscription } from "rxjs/internal/Subscription";
-import { StoreModule } from "./module";
-import { Store } from "./store";
-import { Action, Reducer, SideEffect, SliceStrategy } from "./types";
+import { ElementRef, inject, Injectable, OnDestroy } from '@angular/core';
+import { Observable } from 'rxjs/internal/Observable';
+import { Subscription } from 'rxjs/internal/Subscription';
 
+import { StoreModule } from './module';
+import { Store } from './store';
+import { Action, Reducer, SliceStrategy } from './types';
 
 /**
  * Interface defining configuration options for a Slice.
@@ -12,7 +12,6 @@ import { Action, Reducer, SideEffect, SliceStrategy } from "./types";
 export interface SliceOptions {
   slice?: string;
   reducer?: Reducer;
-  effects?: (SideEffect | any)[];
   dependencies?: any;
   strategy?: SliceStrategy;
 }
@@ -25,7 +24,7 @@ export interface SliceOptions {
  * @see {@link Store} - for interacting with the global Actionstack state.
  * @see {@link Action} - for representing actions that can be dispatched to update the state.
  * @see {@link Reducer} - for defining how the state is updated in response to an action.
- * @see {@link SideEffect} - for handling side effects triggered by actions.
+ * @see {@link Epic} - for handling side epics triggered by actions.
  */
 @Injectable()
 export class Slice implements OnDestroy {
@@ -42,13 +41,12 @@ export class Slice implements OnDestroy {
     try {
       this.elRef = inject(ElementRef);
     } catch {
-      throw new Error('Injection failed. The Slice is provided in the module providers list, but it is suitable to use within component provider list.')
+      console.warn('Injection failed. The Slice is provided in the module providers list, but it is suitable to use within component provider list.')
     }
 
     this.opts = {
-      slice: this.elRef.nativeElement.localName,
+      slice: this.elRef ? this.elRef.nativeElement.localName : "noname",
       reducer: (state: any = {}, action: Action<any>) => state,
-      effects: [],
       dependencies: {},
       strategy: "persistent"
     };
@@ -61,7 +59,6 @@ export class Slice implements OnDestroy {
    */
   setup(opts: SliceOptions): void {
     this.opts = Object.assign(this.opts, opts);
-    this.opts.effects && this.opts.effects.length > 0 && (this.subscription = this.store.extend(...this.opts.effects as any).subscribe());
     this.opts.slice !== undefined && this.opts.reducer && this.store.loadModule({
       slice: this.opts.slice,
       dependencies: this.opts.dependencies,
@@ -93,7 +90,6 @@ export class Slice implements OnDestroy {
    * Cleans up resources when the Slice is destroyed.
    */
   ngOnDestroy(): void {
-    this.subscription.unsubscribe();
     this.opts.slice !== undefined && this.opts.reducer && this.store.unloadModule({slice: this.opts.slice, reducer: this.opts.reducer}, this.opts.strategy === "temporary" ? true : false);
   }
 }

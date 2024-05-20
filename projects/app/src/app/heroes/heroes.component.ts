@@ -1,8 +1,10 @@
+import { Store } from '@actioncrew/actionstack';
+import { addEpics, removeEpics } from '@actioncrew/actionstack/epics';
 import { Component, OnDestroy, OnInit } from '@angular/core';
 import { Subscription } from 'rxjs';
 
-import { Store } from '@actioncrew/actionstack';
 import { Hero } from '../hero';
+import { HeroService } from './../hero.service';
 import { getHeroesRequest, loadHeroes, selectHeroes } from './heroes.slice';
 
 @Component({
@@ -12,15 +14,14 @@ import { getHeroesRequest, loadHeroes, selectHeroes } from './heroes.slice';
 })
 export class HeroesComponent implements OnInit, OnDestroy {
   heroes: Hero[] = [];
-  subscriptionA!: Subscription;
-  subscriptionB!: Subscription;
+  subscription!: Subscription;
 
-  constructor(private store: Store) { }
+  constructor(private store: Store, private heroService: HeroService) { }
 
   ngOnInit(): void {
-    this.subscriptionA = this.store.extend(loadHeroes()).subscribe();
+    this.store.dispatch(addEpics(loadHeroes));
 
-    this.subscriptionB = this.store.select(selectHeroes()).subscribe(value => {
+    this.subscription = this.store.select(selectHeroes()).subscribe(value => {
       this.heroes = value;
     });
 
@@ -32,7 +33,8 @@ export class HeroesComponent implements OnInit, OnDestroy {
   }
 
   ngOnDestroy(): void {
-    this.subscriptionA.unsubscribe();
-    this.subscriptionB.unsubscribe();
+    this.subscription.unsubscribe();
+
+    this.store.dispatch(removeEpics(loadHeroes));
   }
 }

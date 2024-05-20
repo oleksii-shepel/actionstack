@@ -32,12 +32,12 @@ function createAction(typeOrThunk: string | Function, payloadCreator?: Function)
       }
     } else if (payloadCreator) {
       let result = payloadCreator(...args);
-      if (!result) {
-        throw new Error('payloadCreator did not return an object. Did you forget to initialize an action with params?');
+      if (result === undefined || result === null) {
+        console.warn('payloadCreator did not return an object. Did you forget to initialize an action with params?');
       }
 
       // Do not return payload if it is undefined
-      if (result !== undefined) {
+      if (result !== undefined && result !== null) {
         action.payload = result;
         'meta' in result && (action.meta = result.meta);
         'error' in result && (action.error = result.error);
@@ -94,13 +94,14 @@ export function bindActionCreator(actionCreator: Function, dispatch: Function): 
  * in a single call, promoting cleaner component code.
  */
 export function bindActionCreators(actionCreators: any, dispatch: Function): any {
+  if (typeof actionCreators !== "object" || actionCreators === null) {
+    console.warn(`bindActionCreators expected an object or a function, but instead received: '${kindOf(actionCreators)}'. Did you write "import ActionCreators from" instead of "import * as ActionCreators from"?`);
+    return undefined;
+  }
+
   actionCreators = { ...actionCreators };
   if (typeof actionCreators === "function") {
     return bindActionCreator(actionCreators, dispatch);
-  }
-
-  if (typeof actionCreators !== "object" || actionCreators === null) {
-    throw new Error(`bindActionCreators expected an object or a function, but instead received: '${kindOf(actionCreators)}'. Did you write "import ActionCreators from" instead of "import * as ActionCreators from"?`);
   }
 
   const keys = Object.keys(actionCreators);

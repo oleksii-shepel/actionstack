@@ -1,14 +1,31 @@
-import { InjectionToken, Injector, Type, inject } from "@angular/core";
-import { BehaviorSubject } from "rxjs/internal/BehaviorSubject";
-import { Observable } from "rxjs/internal/Observable";
-import { Subject } from "rxjs/internal/Subject";
-import { Subscription } from "rxjs/internal/Subscription";
-import { action, bindActionCreators } from "./actions";
-import { Lock } from "./lock";
-import { EMPTY, concat, concatMap, merge, waitFor } from "./operators";
-import { starter } from "./starter";
-import { TrackableObservable, Tracker } from "./tracker";
-import { Action, AnyFn, AsyncReducer, FeatureModule, MainModule, MetaReducer, Observer, ProcessingStrategy, Reducer, SideEffect, StoreEnhancer, Tree, isAction, isPlainObject, kindOf } from "./types";
+import { inject, InjectionToken, Injector, Type } from '@angular/core';
+import { BehaviorSubject } from 'rxjs/internal/BehaviorSubject';
+import { Observable } from 'rxjs/internal/Observable';
+import { Subject } from 'rxjs/internal/Subject';
+import { Subscription } from 'rxjs/internal/Subscription';
+
+import { action, bindActionCreators } from './actions';
+import { Lock } from './lock';
+import { concatMap, waitFor } from './operators';
+import { ExecutionStack } from './stack';
+import { starter } from './starter';
+import { TrackableObservable, Tracker } from './tracker';
+import {
+  Action,
+  AnyFn,
+  AsyncReducer,
+  Epic,
+  FeatureModule,
+  isPlainObject,
+  kindOf,
+  MainModule,
+  MetaReducer,
+  Observer,
+  ProcessingStrategy,
+  Reducer,
+  StoreEnhancer,
+  Tree,
+} from './types';
 
 export { createStore as store };
 
@@ -78,8 +95,8 @@ const systemActions = {
   storeInitialized: systemAction("STORE_INITIALIZED"),
   moduleLoaded: systemAction("MODULE_LOADED", (module: FeatureModule) => ({module})),
   moduleUnloaded: systemAction("MODULE_UNLOADED", (module: FeatureModule) => ({module})),
-  effectsRegistered: systemAction("EFFECTS_REGISTERED", (effects: SideEffect[]) => ({effects})),
-  effectsUnregistered: systemAction("EFFECTS_UNREGISTERED", (effects: SideEffect[]) => ({effects}))
+  epicsRegistered: systemAction("EFFECTS_REGISTERED", (epics: Epic[]) => ({epics})),
+  epicsUnregistered: systemAction("EFFECTS_UNREGISTERED", (epics: Epic[]) => ({epics}))
 };
 
 /**
@@ -98,7 +115,8 @@ export class Store {
     reducer: (state: any = {}, action: Action<any>) => state as Reducer,
     metaReducers: [],
     dependencies: {},
-    strategy: "exclusive" as ProcessingStrategy
+    strategy: "exclusive" as ProcessingStrategy,
+    callback: () => {}
   };
   protected modules: FeatureModule[] = [];
   protected pipeline = {
@@ -116,6 +134,7 @@ export class Store {
   protected settings = { ...new StoreSettings(), ...inject(StoreSettings) };
   protected tracker = new Tracker();
   protected lock = new Lock();
+  protected stack = new ExecutionStack();
 
   /**
    * Creates a new store instance with the provided mainModule and optional enhancer.
@@ -173,13 +192,15 @@ export class Store {
       store.systemActions.initializeState();
       store.systemActions.storeInitialized();
 
+      store.mainModule.callback!();
       return store;
     }
 
     // Apply enhancer if provided
     if (typeof enhancer !== "undefined") {
       if (typeof enhancer !== "function") {
-        throw new Error(`Expected the enhancer to be a function. Instead, received: '${kindOf(enhancer)}'`);
+        console.warn(`Expected the enhancer to be a function. Instead, received: '${kindOf(enhancer)}'`);
+        return;
       }
       // Apply the enhancer to the storeCreator function
       return enhancer(storeCreator)(mainModule);
@@ -218,11 +239,19 @@ export class Store {
    * @returns {Promise<void>} A promise that resolves after executing the callback.
    * @template T
    */
-  exec<T = any>(slice: keyof T | string[], callback: (state:  Readonly<T>) => void | Promise<void>): Promise<void> {
-    const promise = this.lock.acquire()
-      .then(() => this.getState(slice))
-      .then(state => callback(state as any))
-      .finally(() => this.lock.release());
+  read<T = any>(slice: keyof T | string[], callback: (state:  Readonly<T>) => void | Promise<void>): Promise<void> {
+    const promise = (async () => {
+      await this.stack.waitForEmpty(); // Wait for stack to become empty
+      await this.lock.acquire(); // Acquire lock after stack is empty
+
+      try {
+        const state = await this.getState(slice); // Get state after acquiring lock
+        callback(state as any);
+      } finally {
+        this.lock.release(); // Release lock regardless of success or failure
+      }
+    })();
+
     return promise;
   }
 
@@ -276,7 +305,7 @@ export class Store {
         }
       }, this.currentState.value) as T;
     } else {
-      throw new Error("Unsupported type of slice parameter");
+      console.warn("Unsupported type of slice parameter");
     }
   }
 
@@ -332,7 +361,8 @@ export class Store {
       newState = this.applyChange(this.currentState.value, {path: slice, value}, {});
     } else {
       // Unsupported type of slice parameter
-      throw new Error("Unsupported type of slice parameter");
+      console.warn("Unsupported type of slice parameter");
+      return;
     }
 
     this.tracker.reset();
@@ -346,10 +376,10 @@ export class Store {
 
     let stateUpdated = next(this.currentState, newState);
     let actionHandled = next(this.currentAction, action);
-    let effectsExecuted = this.tracker.allExecuted;
+    let epicsExecuted = this.tracker.allExecuted;
 
     if (this.settings.awaitStatePropagation) {
-      await Promise.allSettled([stateUpdated, actionHandled, effectsExecuted]);
+      await Promise.allSettled([stateUpdated, actionHandled, epicsExecuted]);
     }
 
     return newState;
@@ -366,7 +396,8 @@ export class Store {
    */
   protected async updateState<T = any>(slice: keyof T | string[] | undefined, callback: AnyFn, action: Action<any> = systemActions.updateState()): Promise<any> {
     if(callback === undefined) {
-      throw new Error('Callback function is missing. State will not be updated.')
+      console.warn('Callback function is missing. State will not be updated.')
+      return;
     }
 
     let state = await this.getState(slice);
@@ -447,15 +478,24 @@ export class Store {
     // Define async compose function to apply meta reducers
     const asyncCompose = (...fns: MetaReducer[]) => async (reducer: AsyncReducer) => {
       for (let i = fns.length - 1; i >= 0; i--) {
-        reducer = await fns[i](reducer);
+        try {
+          reducer = await fns[i](reducer);
+        } catch (error: any) {
+          console.warn(`Error in metareducer ${i}:`, error.message);
+        }
       }
       return reducer;
     };
 
     // Apply meta reducers if enabled
-    this.settings.enableMetaReducers && this.mainModule.metaReducers
-      && this.mainModule.metaReducers.length
-      && (reducer = await asyncCompose(...this.mainModule.metaReducers)(reducer));
+    if (this.settings.enableMetaReducers && this.mainModule.metaReducers && this.mainModule.metaReducers.length) {
+      try {
+        reducer = await asyncCompose(...this.mainModule.metaReducers)(reducer);
+      } catch (error: any) {
+        console.warn('Error applying meta reducers:', error.message);
+      }
+    }
+
     this.pipeline.reducer = reducer;
 
     // Update store state
@@ -566,29 +606,28 @@ export class Store {
    */
   protected processAction() {
     return (source: Observable<Action<any>>) =>
-      new Observable<Action<any>>(subscriber => {
-
-        const subscription = source.pipe(
-          concatMap(async (action: Action<any>) => {
-            try {
-              return await this.updateState("@global", async (state) => await this.pipeline.reducer(state, action), action);
-            } finally {
-              this.isProcessing.next(false);
-            }
-          })
-        ).subscribe({
-          error: (error) => {
-            console.warn(error.message);
-            subscriber.complete(); // Complete the observable on error
-          },
-          complete: () => {
-            subscriber.complete(); // Complete the observable when the source completes
-          }
-        });
-
-        return () => subscription.unsubscribe();
+      new Observable(subscriber => {
+        const subscription = source.pipe(concatMap(async (action) => {
+        try {
+          return await this.updateState("@global", async (state) => await this.pipeline.reducer(state, action), action);
+        } catch (error: any) {
+          console.warn(error.message);
+        } finally {
+          this.isProcessing.next(false);
+        }
+      })).subscribe({
+        error: (error: any) => {
+          console.warn("Error during processing the action");
+          subscriber.complete();
+        },
+        complete: () => {
+          subscriber.complete();
+        }
       });
+      return () => subscription.unsubscribe();
+    });
   }
+
 
   /**
    * Applies middleware to the store's dispatch method.
@@ -598,25 +637,22 @@ export class Store {
   protected applyMiddleware(): Store {
 
     let dispatch = (action: any) => {
-      throw new Error("Dispatching while constructing your middleware is not allowed. Other middleware would not be applied to this dispatch.");
+      console.warn("Dispatching while constructing your middleware is not allowed. Other middleware would not be applied to this dispatch.");
+      return;
     };
 
     // Define starter and middleware APIs
-    const starterAPI = {
+    const middlewareAPI = {
       getState: () => this.getState(),
       dispatch: async (action: any) => await dispatch(action),
       dependencies: () => this.pipeline.dependencies,
       strategy: () => this.pipeline.strategy,
-      lock: this.lock
-    };
-
-    const middlewareAPI = {
-      getState: () => this.getState(),
-      dispatch: async (action: any) => await dispatch(action),
+      lock: this.lock,
+      stack: this.stack
     };
 
     // Build middleware chain
-    const chain = [starter(starterAPI), ...this.pipeline.middleware.map(middleware => middleware(middlewareAPI))];
+    const chain = [starter(middlewareAPI), ...this.pipeline.middleware.map(middleware => middleware(middlewareAPI))];
     const originalDispatch = this.dispatch.bind(this);
     // Compose middleware chain with dispatch function
     dispatch = (chain.length === 1 ? chain[0] : chain.reduce((a, b) => (...args: any[]) => a(b(...args))))(async (action: any) => {
@@ -627,53 +663,6 @@ export class Store {
 
     this.dispatch = dispatch;
     return this;
-  }
-
-  /**
-   * Extends the observable stream with the provided side effects.
-   * @param {...SideEffect[]} args - The side effect functions to extend the stream.
-   * @returns {Observable<any>} An observable stream extended with the specified side effects.
-   * @protected
-   */
-  extend<T>(...args: SideEffect[]): Observable<T> {
-    const dependencies = this.pipeline.dependencies;
-
-    const effects$ = new TrackableObservable<T>((subscriber: Observer<T>) => {
-      let effectsSubscription: Subscription | undefined;
-      const unregisterEffects = () => {
-        if (effectsSubscription) {
-          effectsSubscription.unsubscribe();
-          effectsSubscription = undefined;
-        }
-        this.systemActions.effectsUnregistered(args);
-      };
-
-      this.tracker.track(effects$);
-
-      const sideEffects = args.map(sideEffect => sideEffect(this.currentAction, this.currentState, dependencies));
-      let effectsExecutedCount = 0;
-      effectsSubscription = (this.pipeline.strategy === "concurrent" ? merge : concat)(...sideEffects).subscribe({
-        next: (childAction: any) => {
-          if (isAction(childAction)) {
-            this.dispatch(childAction);
-          }
-          effectsExecutedCount++;
-          if(effectsExecutedCount === args.length) {
-            this.tracker.setStatus(effects$, true);
-          }
-        },
-        error: (err: any) => subscriber.error(err),
-        complete: () => { subscriber.complete() },
-      });
-
-      return () => {
-        unregisterEffects();
-        this.tracker.remove(effects$);
-      }
-    }, this.tracker);
-
-    this.systemActions.effectsRegistered(args);
-    return effects$;
   }
 
   /**

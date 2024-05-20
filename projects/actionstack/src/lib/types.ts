@@ -1,6 +1,7 @@
-import { InjectionToken, Type } from "@angular/core";
+import { InjectionToken, Type } from '@angular/core';
 import { Observable } from 'rxjs/internal/Observable';
-import { Store } from "./store";
+
+import { Store } from './store';
 
 /**
  * Interface defining the structure of an action object.
@@ -165,22 +166,22 @@ export interface ProjectionFunction {
 }
 
 /**
- * Type alias for a side effect function.
+ * Type alias for a side epic function.
  *
- * Side effects are functions that can perform actions outside the core Actionstack dispatch cycle, such as:
+ * Side epics are functions that can perform actions outside the core Actionstack dispatch cycle, such as:
  *  - Making network requests
  *  - Logging data
  *  - Persisting state to local storage
- * This type defines the expected signature for a side effect function.
+ * This type defines the expected signature for a side epic function.
  *
  * @param action - An observable of the dispatched action object.
  * @param state - An observable of the current application state.
- * @param dependencies - A record object containing any additional dependencies required by the side effect.
+ * @param dependencies - A record object containing any additional dependencies required by the side epic.
  * @returns Observable<Action<any>> - An observable that emits new action objects to be dispatched.
- *   The side effect function can use the provided observables and dependencies to perform its tasks
+ *   The side epic function can use the provided observables and dependencies to perform its tasks
  *   and potentially emit new actions to be dispatched back to the store.
  */
-export type SideEffect = (action: Observable<Action<any>>, state: Observable<any>, dependencies: Record<string, any>) => Observable<Action<any>>;
+export type Epic = (action: Observable<Action<any>>, state: Observable<any>, dependencies: Record<string, any>) => Observable<Action<any>>;
 
 /**
  * Type alias representing a recursive tree structure.
@@ -203,7 +204,7 @@ export type Tree<LeafType, T = any> = {
 };
 
 /**
- * Type alias representing processing strategies for side effects.
+ * Type alias representing processing strategies for side epics.
  *
  */
 export type ProcessingStrategy = "exclusive" | "concurrent";
@@ -255,8 +256,8 @@ export interface FeatureModule {
  *                   An optional tree representing the dependencies required by the main application.
  *                   - These dependencies can be types or injection tokens used for dependency injection.
  *                   - The tree structure allows for specifying nested dependencies.
- * @property strategy?: ProcessingStrategy (optional) - The processing strategy for side effects within the application.
- *                  - This defines how side effects (functions performing actions outside the dispatch cycle) are executed.
+ * @property strategy?: ProcessingStrategy (optional) - The processing strategy for side epics within the application.
+ *                  - This defines how side epics (functions performing actions outside the dispatch cycle) are executed.
  *                  - Possible strategies are "exclusive" (run one at a time) or "concurrent" (run in parallel).
  */
 export interface MainModule {
@@ -266,6 +267,7 @@ export interface MainModule {
   metaReducers?: MetaReducer[];
   dependencies?: Tree<Type<any> | InjectionToken<any>>;
   strategy?: ProcessingStrategy;
+  callback?: Function;
 }
 
 /**
