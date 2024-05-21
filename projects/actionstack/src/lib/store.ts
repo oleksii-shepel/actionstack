@@ -14,7 +14,6 @@ import {
   Action,
   AnyFn,
   AsyncReducer,
-  Epic,
   FeatureModule,
   isPlainObject,
   kindOf,
@@ -51,9 +50,7 @@ const SYSTEM_ACTION_TYPES = [
   "UPDATE_STATE",
   "STORE_INITIALIZED",
   "MODULE_LOADED",
-  "MODULE_UNLOADED",
-  "EFFECTS_REGISTERED",
-  "EFFECTS_UNREGISTERED"
+  "MODULE_UNLOADED"
 ] as const;
 
 /**
@@ -95,8 +92,6 @@ const systemActions = {
   storeInitialized: systemAction("STORE_INITIALIZED"),
   moduleLoaded: systemAction("MODULE_LOADED", (module: FeatureModule) => ({module})),
   moduleUnloaded: systemAction("MODULE_UNLOADED", (module: FeatureModule) => ({module})),
-  epicsRegistered: systemAction("EFFECTS_REGISTERED", (epics: Epic[]) => ({epics})),
-  epicsUnregistered: systemAction("EFFECTS_UNREGISTERED", (epics: Epic[]) => ({epics}))
 };
 
 /**
