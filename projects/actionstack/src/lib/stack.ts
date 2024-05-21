@@ -1,4 +1,4 @@
-import { BehaviorSubject } from 'rxjs/internal/BehaviorSubjects';
+import { BehaviorSubject } from 'rxjs/internal/BehaviorSubject';
 
 import { waitFor } from './operators';
 
