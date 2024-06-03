@@ -1,15 +1,16 @@
 import { BehaviorSubject } from 'rxjs/internal/BehaviorSubject';
-
-import { waitFor } from './operators';
+import { Observable } from 'rxjs/internal/Observable';
+import { Subscription } from 'rxjs/internal/Subscription';
 
 /**
- * Enumeration for the types of operations.
+ * Enum representing different types of operations.
  * @enum {string}
  */
 export enum OperationType {
   ACTION = "action",
   ASYNC_ACTION = "async action",
-  EFFECT = "effect"
+  EPIC = "epic",
+  SAGA = "saga"
 }
 
 /**
@@ -17,33 +18,31 @@ export enum OperationType {
  * @interface
  */
 export interface Operation {
-  /**
-   * The type of operation.
-   * @type {OperationType}
-   */
+  /** The type of operation. */
   operation: OperationType;
-
-  /**
-   * The instance associated with the operation.
-   * @type {*}
-   */
-  instance: any;
+  /** The instance associated with the operation. */
+  instance: Function;
+  /** Optional source of the operation. */
+  source?: Operation;
 }
 
 /**
- * A class representing an execution stack.
- * @template T
+ * Checks if the given object is an Operation.
+ * @param {any} obj - The object to check.
+ * @returns {boolean} True if the object is an Operation, false otherwise.
  */
-export class ExecutionStack<T = Operation> {
-  /**
-   * The internal stack represented as a BehaviorSubject.
-   * @private
-   * @type {BehaviorSubject<T[]>}
-   */
-  private stack = new BehaviorSubject<T[]>([]);
+export const isOperation = (obj: any): boolean => {
+  return obj.operation !== undefined && obj.instance !== undefined;
+};
+
+/**
+ * Class representing a stack of operations with observable capabilities.
+ */
+export class ExecutionStack {
+  private stack = new BehaviorSubject<Operation[]>([]);
 
   /**
-   * Gets the length of the stack.
+   * Gets the current length of the stack.
    * @returns {number} The length of the stack.
    */
   get length(): number {
@@ -52,43 +51,36 @@ export class ExecutionStack<T = Operation> {
 
   /**
    * Pushes an item onto the stack.
-   * @param {T} item - The item to push onto the stack.
+   * @param {Operation} item - The item to push onto the stack.
    */
-  push(item: T): void {
+  push(item: Operation): void {
     this.stack.next([...this.stack.value, item]);
   }
 
   /**
    * Peeks at the top item of the stack without removing it.
-   * @returns {T | undefined} The top item of the stack, or undefined if the stack is empty.
+   * @returns {Operation | undefined} The top item of the stack, or undefined if the stack is empty.
    */
-  peek(): T | undefined {
+  peek(): Operation | undefined {
     return this.stack.value[this.stack.value.length - 1];
   }
 
   /**
-   * Filters the stack based on a predicate and returns the filtered items.
-   * @param {function(T): boolean} predicate - The predicate function to filter the stack.
-   * @returns {T[]} The filtered items.
+   * Pops the specified item from the stack.
+   * @param {Operation} item - The item to pop from the stack.
+   * @returns {Operation | undefined} The popped item, or undefined if the item is not found.
    */
-  filter(predicate: (item: T) => boolean): T[] {
-    const filtered = this.stack.value.filter(predicate);
-    this.stack.next(filtered);
-    return filtered;
+  pop(item: Operation): Operation | undefined {
+    let index = this.stack.value.lastIndexOf(item);
+    if(index > -1) {
+      this.stack.next(this.stack.value.filter((_, i) => i !== index));
+      return item;
+    }
+    return undefined;
   }
 
   /**
-   * Pops the top item off the stack.
-   * @returns {T | undefined} The popped item, or undefined if the stack was empty.
-   */
-  pop(): T | undefined {
-    const value = this.peek();
-    this.stack.next(this.stack.value.slice(0, -1));
-    return value;
-  }
-
-  /**
-   * Clears the stack.
+   * Clears all items from the stack.
    */
   clear(): void {
     this.stack.next([]);
@@ -96,17 +88,76 @@ export class ExecutionStack<T = Operation> {
 
   /**
    * Converts the stack to an array.
-   * @returns {T[]} An array of the items in the stack.
+   * @returns {Operation[]} An array of operations in the stack.
    */
-  toArray(): T[] {
+  toArray(): Operation[] {
     return [...this.stack.value];
   }
 
   /**
-   * Waits for the stack to become empty.
-   * @returns {Promise<T[]>} A promise that resolves with the stack items when the stack becomes empty.
+   * Finds the last operation in the stack that satisfies the given condition.
+   * @param {(element: Operation) => boolean} condition - The condition to match.
+   * @returns {Operation | undefined} The last matching operation, or undefined if no match is found.
    */
-  async waitForEmpty(): Promise<T[]> {
+  findLast(condition: (element: Operation) => boolean): Operation | undefined {
+    for (const element of this.stack.value.slice().reverse()) {
+      if (condition(element)) {
+        return element;
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Waits until the stack is empty.
+   * @returns {Promise<Operation[]>} A promise that resolves with the stack when it becomes empty.
+   */
+  async waitForEmpty(): Promise<Operation[]> {
     return await waitFor(this.stack, value => value.length === 0);
   }
+
+  /**
+   * Waits until the stack is idle (i.e., contains no ACTION operations).
+   * @returns {Promise<Operation[]>} A promise that resolves with the stack when it becomes idle.
+   */
+  async waitForIdle(): Promise<Operation[]> {
+    return await waitFor(this.stack, value => !value.some(item => item.operation === OperationType.ACTION));
+  }
+}
+
+/**
+ * Waits for a condition to be met in an observable stream.
+ * @template T
+ * @param {Observable<T>} obs - The observable stream to wait for.
+ * @param {(value: T) => boolean} predicate - The predicate function to evaluate the values emitted by the observable stream.
+ * @returns {Promise<T>} A promise that resolves to the value when the predicate condition is met, or rejects if the observable completes without satisfying the predicate.
+ */
+function waitFor<T>(obs: Observable<T>, predicate: (value: T) => boolean): Promise<T> {
+  let subscription: Subscription | undefined;
+
+  return new Promise<T>((resolve, reject) => {
+    const checkInitialValue = (obs as BehaviorSubject<T>)?.value;
+    if (checkInitialValue !== undefined && predicate(checkInitialValue)) {
+      return resolve(checkInitialValue);
+    }
+
+    subscription = obs.subscribe({
+      next: value => {
+        if (predicate(value)) {
+          if (subscription) {
+            subscription.unsubscribe();
+          }
+          resolve(value);
+        }
+      },
+      error: err => reject(err),
+      complete: () => {
+        reject("Method had completed before predicate condition was met");
+      },
+    });
+  }).finally(() => {
+    if (subscription && !subscription.closed) {
+      subscription.unsubscribe();
+    }
+  });
 }

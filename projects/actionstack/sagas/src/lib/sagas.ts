@@ -1,5 +1,6 @@
-import { Action, action } from '@actioncrew/actionstack';
+import { Action, action, Operation, OperationType } from '@actioncrew/actionstack';
 import { runSaga, Saga, SagaMiddlewareOptions, stdChannel, Task } from 'redux-saga';
+import { call, cancelled } from 'redux-saga/effects';
 
 export const createSagasMiddleware = ({
     context = {},
@@ -9,8 +10,17 @@ export const createSagasMiddleware = ({
     channel = stdChannel()
   } : SagaMiddlewareOptions) => {
   let activeSagas = new Map();
+  let middlewareDispatch: any;
+  let middlewareGetState: any;
 
-  const sagaMiddleware = ({ dispatch, getState }: any) => (next: any) => async (action: Action<any>) => {
+  const customDispatch = (dispatch: any) => (sagaOp: Operation) => (action: Action<any>) => {
+    const actionWithSource = Object.assign({}, action, {source: sagaOp});
+    dispatch(actionWithSource);
+  };
+
+  const sagaMiddleware = ({ dispatch, getState, dependencies, stack }: any) => (next: any) => async (action: Action<any>) => {
+    middlewareDispatch = dispatch; middlewareGetState = getState;
+
     // Proceed to the next action
     const result = await next(action);
 
@@ -20,7 +30,24 @@ export const createSagasMiddleware = ({
       if (action.type === 'ADD_SAGAS') {
         action.payload.sagas.forEach((saga: Saga) => {
           if (!activeSagas.has(saga)) {
-            const task: Task = sagaMiddleware.run(saga); // Call saga only once
+            if (typeof saga !== 'function') {
+              throw new Error('saga argument must be a Generator function!');
+            }
+
+            const op = {operation: OperationType.SAGA, instance: saga};
+            const task: Task = runSaga({ context, channel, dispatch: customDispatch(middlewareDispatch)(op), getState: middlewareGetState }, (function*(): Generator<any, void, any> {
+              try {
+                stack.push(op); Object.assign(context, dependencies());
+                yield call(saga);
+              } catch (error) {
+                console.error('Saga error:', error);
+              } finally {
+                stack.pop(op);
+                if (yield cancelled()) {
+                  return;
+                }
+              }
+            }));
             activeSagas.set(saga, task);
           }
         });
@@ -36,17 +63,6 @@ export const createSagasMiddleware = ({
     }
 
     return result;
-  };
-
-  sagaMiddleware.run = (saga: Saga, ...args: any[]) => {
-    if (typeof saga !== 'function') {
-      throw new Error('saga argument must be a Generator function!');
-    }
-    return runSaga({ context, channel }, saga, ...args);
-  };
-
-  sagaMiddleware.setContext = (props: any) => {
-    Object.assign(context, props);
   };
 
   return sagaMiddleware;

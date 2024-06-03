@@ -2,11 +2,9 @@ import { inject, InjectionToken, Injector, Type } from '@angular/core';
 import { BehaviorSubject } from 'rxjs/internal/BehaviorSubject';
 import { Observable } from 'rxjs/internal/Observable';
 import { Subject } from 'rxjs/internal/Subject';
-import { Subscription } from 'rxjs/internal/Subscription';
 
 import { action, bindActionCreators } from './actions';
 import { Lock } from './lock';
-import { concatMap, waitFor } from './operators';
 import { ExecutionStack } from './stack';
 import { starter } from './starter';
 import { TrackableObservable, Tracker } from './tracker';
@@ -91,7 +89,7 @@ const systemActions = {
   updateState: systemAction("UPDATE_STATE"),
   storeInitialized: systemAction("STORE_INITIALIZED"),
   moduleLoaded: systemAction("MODULE_LOADED", (module: FeatureModule) => ({module})),
-  moduleUnloaded: systemAction("MODULE_UNLOADED", (module: FeatureModule) => ({module})),
+  moduleUnloaded: systemAction("MODULE_UNLOADED", (module: FeatureModule) => ({module}))
 };
 
 /**
@@ -110,8 +108,7 @@ export class Store {
     reducer: (state: any = {}, action: Action<any>) => state as Reducer,
     metaReducers: [],
     dependencies: {},
-    strategy: "exclusive" as ProcessingStrategy,
-    callback: () => {}
+    strategy: "exclusive" as ProcessingStrategy
   };
   protected modules: FeatureModule[] = [];
   protected pipeline = {
@@ -120,11 +117,7 @@ export class Store {
     dependencies: {} as Tree<Type<any> | InjectionToken<any>>,
     strategy: "exclusive" as ProcessingStrategy
   };
-  protected actionStream = new Subject<Action<any>>();
-  protected currentAction = new Subject<Action<any>>();
   protected currentState = new BehaviorSubject<any>(undefined);
-  protected isProcessing = new BehaviorSubject<boolean>(false);
-  protected subscription = Subscription.EMPTY;
   protected systemActions = { ...systemActions };
   protected settings = { ...new StoreSettings(), ...inject(StoreSettings) };
   protected tracker = new Tracker();
@@ -167,27 +160,18 @@ export class Store {
       // Bind system actions
       store.systemActions = bindActionCreators(systemActions, (action: Action<any>) => store.settings.dispatchSystemActions && store.dispatch(action));
 
-      // Create action stream observable
-      // Subscribe to action stream and process actions
-      let count = 0;
-
-      store.subscription = store.actionStream.pipe(
-        concatMap(async (action: any) => {
-          if (count === 0) {
-            console.log("%cYou are using ActionStack. Happy coding! 🎉", "font-weight: bold;");
-            await store.currentState.next(await store.setupReducer());
-          }
-          count++;
-          return action;
-        }),
-        store.processAction()
-      ).subscribe(() => {});
-
       // Initialize state and mark store as initialized
       store.systemActions.initializeState();
+
+      console.log("%cYou are using ActionStack. Happy coding! 🎉", "font-weight: bold;");
+
+      store.lock.acquire()
+        .then(() => store.setupReducer())
+        .then(state => store.setState("@global", state))
+        .finally(() => store.lock.release());
+
       store.systemActions.storeInitialized();
 
-      store.mainModule.callback!();
       return store;
     }
 
@@ -210,7 +194,7 @@ export class Store {
    * @param {Action<any>} action - The action to dispatch.
    * @throws {Error} Throws an error if the action is not a plain object, does not have a defined "type" property, or if the "type" property is not a string.
    */
-  dispatch(action: Action<any> | any) {
+  async dispatch(action: Action<any> | any) {
     if (!isPlainObject(action)) {
       console.warn(`Actions must be plain objects. Instead, the actual type was: '${kindOf(action)}'. You may need to add middleware to your setup to handle dispatching custom values.`);
       return;
@@ -224,7 +208,11 @@ export class Store {
       return;
     }
 
-    this.actionStream.next(action);
+    try {
+      await this.updateState("@global", async (state) => await this.pipeline.reducer(state, action), action);
+    } catch {
+      console.warn("Error during processing the action");
+    }
   }
 
   /**
@@ -236,7 +224,7 @@ export class Store {
    */
   read<T = any>(slice: keyof T | string[], callback: (state:  Readonly<T>) => void | Promise<void>): Promise<void> {
     const promise = (async () => {
-      await this.stack.waitForEmpty(); // Wait for stack to become empty
+      await this.stack.waitForIdle(); // Wait for stack to become idle
       await this.lock.acquire(); // Acquire lock after stack is empty
 
       try {
@@ -370,11 +358,9 @@ export class Store {
     };
 
     let stateUpdated = next(this.currentState, newState);
-    let actionHandled = next(this.currentAction, action);
-    let epicsExecuted = this.tracker.allExecuted;
 
     if (this.settings.awaitStatePropagation) {
-      await Promise.allSettled([stateUpdated, actionHandled, epicsExecuted]);
+      await Promise.allSettled([stateUpdated]);
     }
 
     return newState;
@@ -594,44 +580,13 @@ export class Store {
   }
 
   /**
-   * Creates an RxJS operator that processes incoming actions.
-   * @param {Observable<Action<any>>} source - The observable stream of actions.
-   * @returns {Observable<any>} An observable stream that processes actions.
-   * @protected
-   */
-  protected processAction() {
-    return (source: Observable<Action<any>>) =>
-      new Observable(subscriber => {
-        const subscription = source.pipe(concatMap(async (action) => {
-        try {
-          return await this.updateState("@global", async (state) => await this.pipeline.reducer(state, action), action);
-        } catch (error: any) {
-          console.warn(error.message);
-        } finally {
-          this.isProcessing.next(false);
-        }
-      })).subscribe({
-        error: (error: any) => {
-          console.warn("Error during processing the action");
-          subscriber.complete();
-        },
-        complete: () => {
-          subscriber.complete();
-        }
-      });
-      return () => subscription.unsubscribe();
-    });
-  }
-
-
-  /**
    * Applies middleware to the store's dispatch method.
    * @returns {Store} The store instance with applied middleware.
    * @protected
    */
   protected applyMiddleware(): Store {
 
-    let dispatch = (action: any) => {
+    let dispatch = async (action: any) => {
       console.warn("Dispatching while constructing your middleware is not allowed. Other middleware would not be applied to this dispatch.");
       return;
     };
@@ -648,13 +603,8 @@ export class Store {
 
     // Build middleware chain
     const chain = [starter(middlewareAPI), ...this.pipeline.middleware.map(middleware => middleware(middlewareAPI))];
-    const originalDispatch = this.dispatch.bind(this);
     // Compose middleware chain with dispatch function
-    dispatch = (chain.length === 1 ? chain[0] : chain.reduce((a, b) => (...args: any[]) => a(b(...args))))(async (action: any) => {
-      this.isProcessing.next(true);
-      originalDispatch(action);
-      return await waitFor(this.isProcessing, value => value === false);
-    });
+    dispatch = (chain.length === 1 ? chain[0] : chain.reduce((a, b) => (...args: any[]) => a(b(...args))))(this.dispatch.bind(this));
 
     this.dispatch = dispatch;
     return this;
