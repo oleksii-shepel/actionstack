@@ -1,6 +1,5 @@
-import { Store } from '@actioncrew/actionstack';
 import { Component } from '@angular/core';
-import { addMessage, clearMessages, selectMessages } from './messages.slice';
+import { HeroService } from '../hero.service'; // Assuming this path
 
 @Component({
   selector: 'app-messages',
@@ -8,15 +7,14 @@ import { addMessage, clearMessages, selectMessages } from './messages.slice';
   styleUrls: ['./messages.component.css']
 })
 export class MessagesComponent {
-  messages$ = this.store.select(selectMessages());
+  messages: string[] = [];
 
-  constructor(private store: Store) {}
+  constructor(private heroService: HeroService) {}
 
-  addMessage(message: string) {
-    this.store.dispatch(addMessage(message));
-  }
-
-  clearMessages() {
-    this.store.dispatch(clearMessages());
+  ngOnInit() {
+    // Subscribe to HeroService log stream (if available)
+    this.heroService.log$.subscribe(message => {
+      this.messages.push(message);
+    });
   }
 }
