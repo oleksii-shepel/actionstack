@@ -13,21 +13,15 @@ export class HeroService {
   log$ = this.logSubject.asObservable();
 
   getHeroes(): Observable<Hero[]> {
-    return of(this.heroes).pipe(
-      tap(() => this.logSubject.next('HeroService: fetched heroes'))
-    );
-  }
-  constructor(private store: Store) { }
-
-  getHeroes(): Observable<Hero[]> {
     return from(new Promise<Hero[]>((resolve) => {
       setTimeout(() => {
         resolve(HEROES);
       }, this.timeout);
     })).pipe(
-      tap(() => this.logSubject.next('HeroService: fetched heroes')))
+      tap(() => this.logSubject.next('HeroService: fetched heroes'))
     );
   }
+  constructor(private store: Store) { }
 
   getHero(id: number): Observable<Hero> {
     return from(new Promise<Hero>((resolve) => {
