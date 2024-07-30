@@ -4,7 +4,6 @@ import { Observable, from, tap } from 'rxjs';
 
 import { Store } from '@actioncrew/actionstack';
 import { Hero } from './hero';
-import { addMessage } from './messages/messages.slice';
 import { HEROES } from './mock-heroes';
 
 @Injectable({ providedIn: 'root' })
