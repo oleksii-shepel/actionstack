@@ -10,7 +10,14 @@ import { HEROES } from './mock-heroes';
 @Injectable({ providedIn: 'root' })
 export class HeroService {
   timeout = 200;
+  private logSubject = new Subject<string>();
+  log$ = this.logSubject.asObservable();
 
+  getHeroes(): Observable<Hero[]> {
+    return of(this.heroes).pipe(
+      tap(() => this.logSubject.next('HeroService: fetched heroes'))
+    );
+  }
   constructor(private store: Store) { }
 
   getHeroes(): Observable<Hero[]> {
@@ -19,7 +26,7 @@ export class HeroService {
         resolve(HEROES);
       }, this.timeout);
     })).pipe(
-      tap(() => this.store.dispatch(addMessage('HeroService: fetched heroes')))
+      tap(() => this.logSubject.next('HeroService: fetched heroes')))
     );
   }
 
@@ -30,7 +37,7 @@ export class HeroService {
         resolve(hero);
       }, this.timeout);
     })).pipe(
-      tap(() => this.store.dispatch(addMessage(`HeroService: fetched hero id=${id}`)))
+      tap(() => this.logSubject.next(`HeroService: fetched hero id=${id}`)))
     );
   }
 }
