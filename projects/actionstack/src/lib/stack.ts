@@ -33,7 +33,7 @@ export class Operation {
   static action(action: AsyncAction<any> | Action<any>): Operation {
     const operationType = typeof action === 'function' ? OperationType.ASYNC_ACTION : OperationType.ACTION;
     const instance = action as Function;
-    const source = typeof action === 'function' ? undefined : (action as any).source;
+    const source = (action as any).source;
     return new Operation(operationType, instance, source);
   }
 
