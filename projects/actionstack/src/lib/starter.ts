@@ -70,8 +70,8 @@ export const createStarter = () => {
           const asyncFunc = (async () => {
             await action(
               async (syncAction: Action<any>) => {
-                  (syncAction as any).source = op;
-                  await this.handleAction(syncAction, next, innerLock);
+                  const actionToHandle = Object.assign({}, syncAction, { source: op });
+                  await this.handleAction(actionToHandle, next, innerLock);
               },
               this.getState,
               this.dependencies()
