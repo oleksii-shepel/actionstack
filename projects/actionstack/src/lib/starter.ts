@@ -56,11 +56,11 @@ export const createStarter = () => {
      * @param {Lock} lockInstance - The lock instance to manage concurrency for this action.
      * @returns {Promise<void> | void} - A promise if the action is asynchronous, otherwise void.
      */
-    async handleAction(action: any, next: Function, lockInstance: any, source?: any) {
+    async handleAction(action: any, next: Function, lockInstance: any) {
 
       await lockInstance.acquire();
 
-      const op = Operation.action(action, source);
+      const op = Operation.action(action);
       this.stack.add(op);
 
       try {
@@ -70,7 +70,8 @@ export const createStarter = () => {
           const asyncFunc = (async () => {
             await action(
               async (syncAction: Action<any>) => {
-                  await this.handleAction(syncAction, next, innerLock, op);
+                  (syncAction as any).source = op;
+                  await this.handleAction(syncAction, next, innerLock);
               },
               this.getState,
               this.dependencies()
