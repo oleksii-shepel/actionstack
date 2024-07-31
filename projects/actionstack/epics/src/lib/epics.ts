@@ -1,4 +1,16 @@
-import { Action, action, ExecutionStack, isAction, OperationType } from '@actioncrew/actionstack';
+import {
+  Action,
+  action,
+  ExecutionStack,
+  isAction,
+  MainModule,
+  Observer,
+  Operation,
+  Store,
+  STORE_ENHANCER,
+  StoreEnhancer,
+} from '@actioncrew/actionstack';
+import { NgModule } from '@angular/core';
 import { Observable } from 'rxjs/internal/Observable';
 import { Subject } from 'rxjs/internal/Subject';
 import { Subscription } from 'rxjs/internal/Subscription';
@@ -40,17 +52,17 @@ function concat(stack: ExecutionStack, ...sources: Epic[]): (action: Observable<
 
         if (index < sources.length) {
           const source = sources[index++];
-          let effect = { operation: OperationType.EPIC, instance: source };
-          stack.push(effect);
+          let effect = Operation.epic(source);
+          stack.add(effect);
           subscription = source(action$, state$, dependencies).subscribe({
             next: value => subscriber.next(Object.assign({}, value, { source: effect })),
             error: error => {
               subscriber.error(error);
-              stack.pop(effect);
+              stack.remove(effect);
             },
             complete: () => {
               subscription = null;
-              stack.pop(effect);
+              stack.remove(effect);
               next();
             }
           });
@@ -92,8 +104,8 @@ function merge(stack: ExecutionStack, ...sources: Epic[]): (action: Observable<A
       };
 
       sources.forEach(source => {
-        let effect = { operation: OperationType.EPIC, instance: source };
-        stack.push(effect);
+        let effect = Operation.epic(source);
+        stack.add(effect);
         const subscription = source(action$, state$, dependencies).subscribe({
           next: value => subscriber.next(Object.assign({}, value, { source: effect })),
           error: error => {
@@ -103,10 +115,10 @@ function merge(stack: ExecutionStack, ...sources: Epic[]): (action: Observable<A
               subscriptions = [];
             }
             subscriber.error(error);
-            stack.pop(effect);
+            stack.remove(effect);
           },
           complete: () => {
-            stack.pop(effect);
+            stack.remove(effect);
             completeIfAllCompleted();
           }
         });
@@ -251,3 +263,70 @@ export const addEpics = action("ADD_EPICS", (...epics: Epic[]) => ({ epics }));
  * @returns {Action<any>} - The action object.
  */
 export const removeEpics = action("REMOVE_EPICS", (...epics: Epic[]) => ({ epics }));
+
+/**
+ * A store enhancer to extend the store with epics.
+ *
+ * @param {Function} createStore - The function to create the store.
+ * @returns {Function} - A function that accepts the main module and optional enhancer to create an epic store.
+ */
+export const storeEnhancer: StoreEnhancer = (createStore) => (module: MainModule, enhancer?: StoreEnhancer): EpicStore => {
+  const store = createStore(module, enhancer) as EpicStore;
+
+  /**
+   * Extends the store with the given epics.
+   *
+   * @template U
+   * @param {...Epic[]} args - The epics to be added to the store.
+   * @returns {Observable<U>} - An observable that completes when the epics are removed.
+   */
+  store.extend = <U>(...args: Epic[]): Observable<U> => {
+    const effects$ = new Observable<U>((subscriber: Observer<U>) => {
+      return () => {
+        store.dispatch(removeEpics(args));
+      }
+    });
+
+    store.dispatch(addEpics(args));
+    return effects$;
+  };
+
+  return store;
+}
+
+/**
+ * An abstract class for the epic store.
+ *
+ * @extends {Store}
+ */
+export abstract class EpicStore extends Store {
+  /**
+   * Abstract method to extend the store with epics.
+   *
+   * @template U
+   * @param {...Epic[]} args - The epics to be added to the store.
+   * @returns {Observable<U>} - An observable that completes when the epics are removed.
+   */
+  abstract extend<U>(...args: Epic[]): Observable<U>;
+}
+
+/**
+ * NgModule for providing the epic store and its enhancer.
+ *
+ * @ngModule
+ */
+@NgModule({
+  providers: [
+    {
+      provide: STORE_ENHANCER,
+      useValue: storeEnhancer,
+      multi: false
+    },
+    {
+      provide: EpicStore,
+      useFactory: (store: Store) => store,
+      deps: [Store]
+    }
+  ]
+})
+export class EpicModule { }

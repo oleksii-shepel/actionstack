@@ -1,25 +1,22 @@
+import { Store } from '@actioncrew/actionstack';
 import { Component } from '@angular/core';
-import { HeroService } from '../hero.service'; // Assuming this path
-import { Observable, startWith, scan, switchMap } from 'rxjs';
+import { addMessage, clearMessages, selectMessages } from './messages.slice';
+
 @Component({
   selector: 'app-messages',
   templateUrl: './messages.component.html',
   styleUrls: ['./messages.component.css']
 })
 export class MessagesComponent {
-  messages$: Observable<string []>;
-  clearSubject$ = new Subject<void>();
-  constructor(private heroService: HeroService) {}
+  messages$ = this.store.select(selectMessages());
 
-  ngOnInit() {
-    this.messages$ = this.clearSubject$.pipe(
-      startWith(null),
-      switchMap(() => this.heroService.log$.pipe(
-        scan((acc, message) => [...acc, message], [] as string[]),
-      ))
-    );
+  constructor(private store: Store) {}
+
+  addMessage(message: string) {
+    this.store.dispatch(addMessage(message));
   }
+
   clearMessages() {
-    this.clearSubject$.next();
+    this.store.dispatch(clearMessages());
   }
 }

@@ -1,7 +1,7 @@
 {
   "name": "@actioncrew/actionstack",
-  "version": "1.0.27",
-  "description": "State management library",
+  "version": "1.3.0",
+  "description": "Asynchronous state management library",
   "license": "MIT",
   "keywords": [
     "RxJS",
@@ -12,7 +12,8 @@
     "state management",
     "store",
     "minified",
-    "well-tuned"
+    "well-tuned",
+    "asynchronous"
   ],
   "peerDependencies": {
     "@angular/core": ">=14.0.0",
@@ -32,6 +33,5 @@
   "bugs": {
     "url": "https://github.com/actioncrew/actionstack/issues"
   },
-  "homepage": "https://actionstack.vercel.app",
-  "email": "oleksii.shepel@outlook.com"
+  "homepage": "https://actionstack.vercel.app"
 }
