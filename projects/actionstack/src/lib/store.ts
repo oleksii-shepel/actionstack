@@ -3,17 +3,15 @@ import { BehaviorSubject } from 'rxjs/internal/BehaviorSubject';
 import { Observable } from 'rxjs/internal/Observable';
 import { Subject } from 'rxjs/internal/Subject';
 
-import { action, bindActionCreators } from './actions';
+import { Action, action, bindActionCreators } from './actions';
 import { Lock } from './lock';
 import { ExecutionStack } from './stack';
 import { starter } from './starter';
 import { Tracker } from './tracker';
 import {
-  Action,
   AnyFn,
   AsyncReducer,
   FeatureModule,
-  isPlainObject,
   kindOf,
   MainModule,
   MetaReducer,
@@ -189,29 +187,31 @@ export class Store {
     return storeCreator(mainModule);
   }
 
-    /**
+  /**
    * Dispatches an action to be processed by the store's reducer.
    * @param {Action} action - The action to dispatch.
-   * @throws {Error} Throws an error if the action is not a plain object, does not have a defined "type" property, or if the "type" property is not a string.
+   * @throws {Error} Throws an error if the action is not a valid `Action` object or if the action's `type` property is missing or invalid.
    */
   async dispatch(action: Action | any) {
-    if (!isPlainObject(action)) {
-      console.warn(`Actions must be plain objects. Instead, the actual type was: '${kindOf(action)}'. You may need to add middleware to your setup to handle dispatching custom values.`);
+    if (!(action instanceof Object)) {
+      console.warn(`Invalid action type: '${kindOf(action)}'. Actions must be instances of the Action class. Ensure the action is properly constructed.`);
       return;
     }
+
     if (typeof action.type === "undefined") {
-      console.warn('Actions may not have an undefined "type" property. You may have misspelled an action type string constant.');
+      console.warn('The "type" property of the action is undefined. Ensure that you have provided a valid "type" for the action.');
       return;
     }
+
     if (typeof action.type !== "string") {
-      console.warn(`Action "type" property must be a string. Instead, the actual type was: '${kindOf(action.type)}'. Value was: '${action.type}' (stringified)`);
+      console.warn(`Invalid action type property: '${kindOf(action.type)}'. The "type" property must be a string. Received: '${action.type}'`);
       return;
     }
 
     try {
       await this.updateState("@global", async (state) => await this.pipeline.reducer(state, action), action);
-    } catch {
-      console.warn("Error during processing the action");
+    } catch (error: any) {
+      console.warn(`Error during processing the action: ${error.message}`);
     }
   }
 
@@ -430,15 +430,21 @@ export class Store {
           const updatedState = await reducer(currentState, action);
           if(currentState !== updatedState) { state = await this.applyChange(state, {path, value: updatedState}, modified); }
         } catch (error: any) {
+          action.reject(error);
           console.warn(`Error occurred while processing an action ${action.type} for ${path.join('.')}: ${error.message}`);
         }
       }
+
+      if (!this.settings.enableMetaReducers) {
+        action.resolve();
+      }
+
       return state;
     };
     return combinedReducer;
   }
 
-    /**
+  /**
    * Sets up the reducer function by combining feature reducers and applying meta reducers.
    * @param {any} [state={}] - The initial state.
    * @returns {Promise<any>} A promise that resolves to the updated state after setting up the reducer.
@@ -460,10 +466,29 @@ export class Store {
         try {
           reducer = await fns[i](reducer);
         } catch (error: any) {
-          console.warn(`Error in metareducer ${i}:`, error.message);
+          console.warn(`Error in meta reducer ${i}:`, error.message);
+          return async (state: any, action: Action) => {
+            action.reject(error);
+            return state;
+          };
         }
       }
-      return reducer;
+
+      // Return a new reducer that resolves the action after successful processing
+      return async (state: any, action: Action) => {
+        try {
+          // Apply the composed reducer to the state
+          const newState = await reducer(state, action);
+          // Resolve the action after successful state update
+          action.resolve();
+          return newState;
+        } catch (error: any) {
+          console.warn(`Error in composed reducer: ${error.message}`);
+          // Reject the action in case of errors during reducer processing
+          action.reject(error);
+          return state;
+        }
+      };
     };
 
     // Apply meta reducers if enabled

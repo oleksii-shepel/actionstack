@@ -1,35 +1,8 @@
 import { InjectionToken, Type } from '@angular/core';
 import { Observable } from 'rxjs/internal/Observable';
 
+import { Action, AsyncAction } from './actions';
 import { Store } from './store';
-
-/**
- * Interface defining the structure of an action object.
- *
- * Actions are the primary way to communicate state changes in Actionstack-like stores.
- * This interface defines the expected properties for an action.
- *
- * @typeparam T - Optional type parameter for the action payload. Defaults to `any`.
- */
-export interface Action<T = any> {
-  type: string;
-  payload?: T;
-  error?: boolean;
-  meta?: any;
-  source?: any;
-}
-
-/**
- * Interface defining the structure of an asynchronous action.
- *
- * Asynchronous actions are functions that return promises, allowing for
- * handling asynchronous operations like network requests or timers within actions.
- *
- * @typeparam T - Optional type parameter for the action payload type (resolved promise value). Defaults to `any`.
- */
-export interface AsyncAction<T = any> {
-  (...args: any[]): Promise<T>;
-}
 
 /**
  * Represents an action creator.
@@ -410,7 +383,7 @@ function isPromise(value: any) {
  * @returns boolean - True if the value is a plain object with a string property named "type", false otherwise.
  */
 function isAction(action: any): boolean {
-  return isPlainObject(action) && "type" in action && typeof action.type === "string";
+  return action instanceof Object && "type" in action && typeof action.type === "string";
 }
 
 /**

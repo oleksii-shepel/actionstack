@@ -16,7 +16,7 @@ export const createPerformanceMonitor = () => {
       const duration = Math.round((endTime - startTime) * 100000) / 100000;
 
       // Generate a unique identifier based on system action type or a random string
-      const uniqueId = (isSystemActionType(action.type))
+      const uniqueId = (action.type !== undefined && isSystemActionType(action.type))
         ? `[⚙️ ${salt(5).split('').join('.')}]`
         : `[🤹 ${salt(5).split('').join('.')}]`;
 

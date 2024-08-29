@@ -2,7 +2,7 @@ import { BehaviorSubject } from 'rxjs/internal/BehaviorSubject';
 import { Observable } from 'rxjs/internal/Observable';
 import { Subscription } from 'rxjs/internal/Subscription';
 
-import { Action, AsyncAction } from './types';
+import { Action, AsyncAction } from './actions';
 
 /**
  * Type representing different types of operations.

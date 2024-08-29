@@ -154,7 +154,7 @@ export function ofType(types: string | string[]): (source: Observable<Action<any
                 observer.next(action);
               }
             } else {
-              if (types.includes(action.type)) {
+              if (action.type !== undefined && types.includes(action.type)) {
                 observer.next(action);
               }
             }

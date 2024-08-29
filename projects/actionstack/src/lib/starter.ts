@@ -1,6 +1,6 @@
+import { Action, AsyncAction } from './actions';
 import { Lock } from './lock';
 import { ExecutionStack, Operation } from './stack';
-import { Action, AsyncAction } from './types';
 
 /**
  * Configuration object for the middleware.
