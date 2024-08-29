@@ -210,8 +210,10 @@ export class Store {
 
     try {
       await this.updateState("@global", async (state) => await this.pipeline.reducer(state, action), action);
+      action.resolve();
     } catch (error: any) {
       console.warn(`Error during processing the action: ${error.message}`);
+      action.reject(error);
     }
   }
 
@@ -430,15 +432,9 @@ export class Store {
           const updatedState = await reducer(currentState, action);
           if(currentState !== updatedState) { state = await this.applyChange(state, {path, value: updatedState}, modified); }
         } catch (error: any) {
-          action.reject(error);
           console.warn(`Error occurred while processing an action ${action.type} for ${path.join('.')}: ${error.message}`);
         }
       }
-
-      if (!this.settings.enableMetaReducers) {
-        action.resolve();
-      }
-
       return state;
     };
     return combinedReducer;
@@ -466,29 +462,10 @@ export class Store {
         try {
           reducer = await fns[i](reducer);
         } catch (error: any) {
-          console.warn(`Error in meta reducer ${i}:`, error.message);
-          return async (state: any, action: Action) => {
-            action.reject(error);
-            return state;
-          };
+          console.warn(`Error in metareducer ${i}:`, error.message);
         }
       }
-
-      // Return a new reducer that resolves the action after successful processing
-      return async (state: any, action: Action) => {
-        try {
-          // Apply the composed reducer to the state
-          const newState = await reducer(state, action);
-          // Resolve the action after successful state update
-          action.resolve();
-          return newState;
-        } catch (error: any) {
-          console.warn(`Error in composed reducer: ${error.message}`);
-          // Reject the action in case of errors during reducer processing
-          action.reject(error);
-          return state;
-        }
-      };
+      return reducer;
     };
 
     // Apply meta reducers if enabled
