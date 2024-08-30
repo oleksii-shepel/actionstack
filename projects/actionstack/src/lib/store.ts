@@ -367,15 +367,15 @@ export class Store {
   }
 
   /**
- * Updates a slice of the state asynchronously using a provided callback function.
- * @template T The type of the state.
- * @param {keyof T | string[] | undefined} slice - The slice of the state to update, specified as a key of T or a path represented by an array of strings.
- * @param {AnyFn} callback - The callback function to apply to the current state slice.
- * @param {Action} [action=systemActions.updateState()] - The action to propagate after updating the state.
- * @returns {Promise<void>} A promise that resolves once the state update is complete.
- * @throws {Error} Throws an error if the callback function is missing.
- * @protected
- */
+   * Updates a slice of the state asynchronously using a provided callback function.
+   * @template T The type of the state.
+   * @param {keyof T | string[] | undefined} slice - The slice of the state to update, specified as a key of T or a path represented by an array of strings.
+   * @param {AnyFn} callback - The callback function to apply to the current state slice.
+   * @param {Action} [action=systemActions.updateState()] - The action to propagate after updating the state.
+   * @returns {Promise<void>} A promise that resolves once the state update is complete.
+   * @throws {Error} Throws an error if the callback function is missing.
+   * @protected
+   */
   protected async updateState<T = any>(slice: keyof T | string[] | undefined, callback: AnyFn, action: Action = systemActions.updateState()): Promise<void> {
     if(callback === undefined) {
       console.warn('Callback function is missing. State will not be updated.')
