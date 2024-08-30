@@ -2,10 +2,9 @@ import { ElementRef, inject, Injectable, OnDestroy } from '@angular/core';
 import { Observable } from 'rxjs/internal/Observable';
 import { Subscription } from 'rxjs/internal/Subscription';
 
-import { Action } from './actions';
 import { StoreModule } from './module';
 import { Store } from './store';
-import { Reducer, SliceStrategy } from './types';
+import { Action, Reducer, SliceStrategy } from './types';
 
 /**
  * Interface defining configuration options for a Slice.

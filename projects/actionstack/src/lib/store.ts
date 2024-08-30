@@ -3,12 +3,13 @@ import { BehaviorSubject } from 'rxjs/internal/BehaviorSubject';
 import { Observable } from 'rxjs/internal/Observable';
 import { Subject } from 'rxjs/internal/Subject';
 
-import { Action, action, bindActionCreators } from './actions';
+import { action, bindActionCreators } from './actions';
 import { Lock } from './lock';
 import { ExecutionStack } from './stack';
 import { starter } from './starter';
 import { Tracker } from './tracker';
 import {
+  Action,
   AnyFn,
   AsyncReducer,
   FeatureModule,

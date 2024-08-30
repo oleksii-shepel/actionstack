@@ -1,37 +1,6 @@
-import { isAction, kindOf } from './types';
+import { Action, isAction, kindOf } from './types';
 
 export { createAction as action };
-
-/**
- * Interface defining the structure of an action object.
- *
- * Actions are the primary way to communicate state changes in Actionstack-like stores.
- * This interface defines the expected properties for an action.
- *
- * @typeparam T - Optional type parameter for the action payload. Defaults to `any`.
- */
-export interface Action<T = any> extends Promise<void> {
-  type: string;
-  payload?: T;
-  error?: boolean;
-  meta?: any;
-  source?: any;
-
-  resolve: () => void;
-  reject: (error: any) => void;
-}
-
-/**
- * Interface defining the structure of an asynchronous action.
- *
- * Asynchronous actions are functions that return promises, allowing for
- * handling asynchronous operations like network requests or timers within actions.
- *
- * @typeparam T - Optional type parameter for the action payload type (resolved promise value). Defaults to `any`.
- */
-export interface AsyncAction<T = any> {
-  (...args: any[]): Promise<T>;
-}
 
 /**
  * Creates an action creator function for Actionstack actions.
