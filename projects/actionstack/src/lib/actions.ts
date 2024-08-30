@@ -1,66 +1,24 @@
-import { kindOf } from './types';
+import { isAction, kindOf } from './types';
 
 export { createAction as action };
 
 /**
- * Represents an action that can be dispatched in a Actionstack store.
- * This class extends `Promise<boolean>` to support asynchronous behavior, allowing
- * actions to be resolved or rejected based on their execution outcome.
+ * Interface defining the structure of an action object.
  *
- * @template T - The type of the payload associated with the action.
+ * Actions are the primary way to communicate state changes in Actionstack-like stores.
+ * This interface defines the expected properties for an action.
+ *
+ * @typeparam T - Optional type parameter for the action payload. Defaults to `any`.
  */
-export class Action<T = any> {
-  private _promise: Promise<void>;
-  private _resolveFn!: () => void;
-  private _rejectFn!: (reason: any) => void;
+export interface Action<T = any> extends Promise<void> {
+  type: string;
+  payload?: T;
+  error?: boolean;
+  meta?: any;
+  source?: any;
 
-  private _isResolved: boolean = false;
-  private _isRejected: boolean = false;
-
-  public type?: string;
-
-  constructor(typeOrThunk: string | Function, public payload?: T, public error?: boolean, public meta?: any, public source?: any) {
-    // Initialize the promise and store the resolve/reject functions
-    this._promise = new Promise((resolve, reject) => {
-      this._resolveFn = resolve;
-      this._rejectFn = reject;
-    });
-
-    if(!(typeOrThunk instanceof Function)) {
-      this.type = typeOrThunk;
-    }
-  }
-
-  // Method to resolve the promise manually
-  resolve(): void {
-    if (!this._isResolved && !this._isRejected) {
-      this._isResolved = true;
-      this._resolveFn();
-    }
-  }
-
-  // Method to reject the promise manually
-  reject(reason?: any): void {
-    if (!this._isResolved && !this._isRejected) {
-      this._isRejected = true;
-      this._rejectFn(reason);
-    }
-  }
-
-  // Returns a promise that resolves when the action is either resolved or rejected.
-  waitForCompletion(): Promise<void> {
-    return this._promise;
-  }
-
-  // Method to check if the action has been executed (either resolved or rejected)
-  hasExecuted(): boolean {
-    return this._isResolved || this._isRejected;
-  }
-
-  // Method to check if the action is asynchronous or not
-  isAsync(): boolean {
-    return !(typeof this.type === 'string');
-  }
+  resolve: () => void;
+  reject: (error: any) => void;
 }
 
 /**
@@ -103,15 +61,33 @@ export function createAction(typeOrThunk: string | Function, payloadCreator?: Fu
     } else {
       // Normal action
       const payload = payloadCreator ? payloadCreator(...args) : args[0];
-      action = new Action(typeOrThunk, payload);
+
+      let resolveFunc: Function = () => {};
+      let rejectFunc: Function = (error: any) => {};
+
+      action = new Promise<void>((resolve, reject) => {
+        resolveFunc = resolve;
+        rejectFunc = reject;
+      }) as Action;
+
+      action.type = typeOrThunk;
 
       if (payloadCreator && (payload === undefined || payload === null)) {
         console.warn('payloadCreator did not return an object. Did you forget to initialize an action with params?');
       }
 
       if (payload !== null && payload !== undefined && typeof payload === 'object') {
+        action.payload = payload;
         'meta' in payload && (action.meta = payload.meta);
         'error' in payload && (action.error = payload.error);
+      }
+
+      action.resolve = () => {
+        resolveFunc();
+      }
+
+      action.reject = (error: any) => {
+        rejectFunc(error);
       }
     }
 
@@ -120,7 +96,7 @@ export function createAction(typeOrThunk: string | Function, payloadCreator?: Fu
 
   actionCreator.toString = () => `${typeOrThunk}`;
   actionCreator.type = typeOrThunk;
-  actionCreator.match = (action: any) => action instanceof Action && action.type === typeOrThunk;
+  actionCreator.match = (action: any) => isAction(action) && action.type === typeOrThunk;
 
   return actionCreator;
 }
@@ -140,7 +116,7 @@ export function createAction(typeOrThunk: string | Function, payloadCreator?: Fu
 export function bindActionCreator(actionCreator: Function, dispatch: Function): Function {
   return function (this: any, ...args: any[]): any {
     const action = actionCreator.apply(this, args);
-    if (action instanceof Action) {
+    if (isAction(action)) {
       dispatch(action);
       return action;
     }
